@@ -32,17 +32,17 @@ def infer_schema_from_sample(sample):
         pa.field("text", pa.string()),
     ]
 
-    if "metadata" in sample and isinstance(sample["metadata"], dict):
-        for k, v in sample["metadata"].items():
-            # Infer type from value
-            if isinstance(v, str):
-                fields.append(pa.field(k, pa.string()))
-            elif isinstance(v, int):
-                fields.append(pa.field(k, pa.int64()))
-            elif isinstance(v, float):
-                fields.append(pa.field(k, pa.float64()))
-            else:
-                fields.append(pa.field(k, pa.string()))  # fallback
+    for k, v in sample.items():
+        if k in ["vector", "text"]:
+            continue
+        if isinstance(v, str):
+            fields.append(pa.field(k, pa.string()))
+        elif isinstance(v, int):
+            fields.append(pa.field(k, pa.int64()))
+        elif isinstance(v, float):
+            fields.append(pa.field(k, pa.float64()))
+        else:
+            fields.append(pa.field(k, pa.string()))  # fallback
 
     return pa.schema(fields)
 
@@ -101,11 +101,13 @@ def main(model_id: str):
             text_val = first_chunk["chunk"]["text"]
         else:
             text_val = first_chunk["chunk"].text
+
         sample_record = {
             "vector": [0.0],
             "text": text_val,
             **first_chunk.get("metadata", {})
         }
+
         schema = infer_schema_from_sample(sample_record)
         logger.info(f"Creating new table with inferred + flattened schema: {TABLE_NAME}")
         table = db.create_table(TABLE_NAME, schema=schema)
