@@ -113,6 +113,11 @@ def main(model_id: str):
         table = db.create_table(TABLE_NAME, schema=schema)
         existing_count = 0
 
+        # 🔎 Dump schema
+        logger.info("📋 Table schema:")
+        for field in schema:
+            logger.info(f"  - {field.name}: {field.type}")
+
     # Save metadata about the embedding model
     db.create_table(
         "embedding_metadata",
