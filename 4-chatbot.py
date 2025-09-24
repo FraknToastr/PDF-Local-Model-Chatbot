@@ -4,7 +4,7 @@ import torch
 import streamlit as st
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import lancedb
-from sentence_transformers import SentenceTransformer  # ✅ embedding models
+from sentence_transformers import SentenceTransformer
 
 # --- Config ---
 DB_DIR = os.path.join("data", "lancedb_data")
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 db = lancedb.connect(DB_DIR)
 if TABLE_NAME not in db.table_names():
     raise RuntimeError(f"❌ Table {TABLE_NAME} not found in LanceDB. Run script 3 first.")
-
 table = db.open_table(TABLE_NAME)
 
 # --- Streamlit UI ---
@@ -27,7 +26,6 @@ st.title("📄 PDF Local Model Chatbot")
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    # Embedding model selection
     embedding_model_id = st.selectbox(
         "Choose embedding model",
         [
@@ -38,7 +36,6 @@ with st.sidebar:
         index=0,
     )
 
-    # LLM selection
     model_id = st.selectbox(
         "Choose LLM",
         [
@@ -54,16 +51,16 @@ with st.sidebar:
     max_new_tokens = st.slider("Max new tokens", 50, 2000, 512, 50)
 
     show_sources = st.checkbox("Show Sources", value=True)
-    debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)  # ✅ new
+    debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)
+    suppress_context = st.checkbox("🚫 Suppress Context (ignore LanceDB chunks)", value=False)  # ✅ NEW
 
 st.write("Ask a question based on the ingested PDFs:")
 
 user_query = st.text_input("Your question:")
 
-# --- Model Loading (lazy) ---
+# --- Model Loading ---
 @st.cache_resource
 def load_model(model_id: str):
-    logger.info(f"Loading model {model_id} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -75,22 +72,21 @@ def load_model(model_id: str):
 if user_query:
     tokenizer, model = load_model(model_id)
 
-    # --- Embed query ---
-    logger.info(f"Using embedding model: {embedding_model_id}")
-    embedder = SentenceTransformer(embedding_model_id)
-    query_embedding = embedder.encode(user_query).tolist()
-
-    # --- Search LanceDB ---
-    results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
-
-    if not results:
-        st.error("No relevant chunks found in database. Try re-running script 2 and 3.")
+    if suppress_context:
+        # 🚫 Skip LanceDB search entirely
+        context = ""
+        results = []
     else:
-        # --- Build context ---
-        context_chunks = [r["text"] for r in results if "text" in r]
-        context = "\n\n".join(context_chunks)
+        # Normal retrieval
+        embedder = SentenceTransformer(embedding_model_id)
+        query_embedding = embedder.encode(user_query).tolist()
+        results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
+        context = "\n\n".join([r["text"] for r in results if "text" in r])
 
-        # --- Grounded system prompt ---
+    # --- Prompt ---
+    if suppress_context:
+        prompt = f"### Question:\n{user_query}\n\n### Answer:\n"
+    else:
         prompt = f"""
 You are a PDF chatbot. Only answer using the provided context from PDFs.
 If the answer is not in the context, reply: 'I could not find relevant information in the PDFs.'
@@ -104,35 +100,34 @@ If the answer is not in the context, reply: 'I could not find relevant informati
 ### Answer:
 """
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=True,
+        )
+
+    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    # --- Display ---
+    st.subheader("🤖 Answer")
+    st.write(answer)
+
+    if show_sources and not suppress_context:
+        st.subheader("📚 Sources")
+        for r in results:
+            meta = r.get("metadata", {})
+            st.markdown(
+                f"- **{meta.get('source_file', 'Unknown')}**, "
+                f"Page {meta.get('page_number', '?')} "
+                f"(Date: {meta.get('date', 'N/A')})"
             )
 
-        answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # --- Display Answer ---
-        st.subheader("🤖 Answer")
-        st.write(answer)
-
-        if show_sources:
-            st.subheader("📚 Sources")
-            for r in results:
-                meta = r.get("metadata", {})
-                st.markdown(
-                    f"- **{meta.get('source_file', 'Unknown')}**, "
-                    f"Page {meta.get('page_number', '?')} "
-                    f"(Date: {meta.get('date', 'N/A')})"
-                )
-
-        # --- Debug: show raw chunks ---
-        if debug_mode:
-            st.subheader("🛠️ Debug: Raw Retrieved Chunks")
-            for i, r in enumerate(results, start=1):
-                st.markdown(f"**Chunk {i}:**")
-                st.code(r.get("text", "")[:1000])  # limit preview to 1000 chars
+    if debug_mode and not suppress_context:
+        st.subheader("🛠️ Debug: Raw Retrieved Chunks")
+        for i, r in enumerate(results, start=1):
+            st.markdown(f"**Chunk {i}:**")
+            st.code(r.get("text", "")[:1000])
