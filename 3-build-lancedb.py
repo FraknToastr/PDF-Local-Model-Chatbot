@@ -132,6 +132,8 @@ def main(model_id: str):
     batch_size = 32
     pbar = tqdm(total=total_chunks, initial=existing_count, desc="Embedding chunks", unit="chunk")
 
+    sample_printed = False  # to only show first sample once
+
     for i in range(existing_count, total_chunks, batch_size):
         batch = all_chunks[i:i+batch_size]
 
@@ -152,6 +154,16 @@ def main(model_id: str):
 
         # Save progress immediately (batch-safe)
         table.add(records)
+
+        # Print first sample to verify schema + metadata
+        if not sample_printed:
+            logger.info("🔎 Sample inserted record:")
+            for k, v in records[0].items():
+                if k == "vector":
+                    logger.info(f"  {k}: [embedding length = {len(v)}]")
+                else:
+                    logger.info(f"  {k}: {v}")
+            sample_printed = True
 
         # Update progress bar
         pbar.update(len(batch))
