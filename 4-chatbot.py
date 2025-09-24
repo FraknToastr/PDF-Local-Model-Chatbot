@@ -4,6 +4,7 @@ import torch
 import streamlit as st
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import lancedb
+from sentence_transformers import SentenceTransformer  # ✅ embedding models
 
 # --- Config ---
 DB_DIR = os.path.join("data", "lancedb_data")
@@ -26,8 +27,20 @@ st.title("📄 PDF Local Model Chatbot")
 with st.sidebar:
     st.header("⚙️ Settings")
 
+    # Embedding model selection
+    embedding_model_id = st.selectbox(
+        "Choose embedding model",
+        [
+            "mixedbread-ai/mxbai-embed-large-v1",
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "sentence-transformers/all-mpnet-base-v2",
+        ],
+        index=0,
+    )
+
+    # LLM selection
     model_id = st.selectbox(
-        "Choose model",
+        "Choose LLM",
         [
             "mistralai/Mistral-7B-Instruct-v0.2",
             "meta-llama/Llama-2-7b-chat-hf",
@@ -41,6 +54,7 @@ with st.sidebar:
     max_new_tokens = st.slider("Max new tokens", 50, 2000, 512, 50)
 
     show_sources = st.checkbox("Show Sources", value=True)
+    debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)  # ✅ new
 
 st.write("Ask a question based on the ingested PDFs:")
 
@@ -62,8 +76,8 @@ if user_query:
     tokenizer, model = load_model(model_id)
 
     # --- Embed query ---
-    from sentence_transformers import SentenceTransformer
-    embedder = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
+    logger.info(f"Using embedding model: {embedding_model_id}")
+    embedder = SentenceTransformer(embedding_model_id)
     query_embedding = embedder.encode(user_query).tolist()
 
     # --- Search LanceDB ---
@@ -115,3 +129,10 @@ If the answer is not in the context, reply: 'I could not find relevant informati
                     f"Page {meta.get('page_number', '?')} "
                     f"(Date: {meta.get('date', 'N/A')})"
                 )
+
+        # --- Debug: show raw chunks ---
+        if debug_mode:
+            st.subheader("🛠️ Debug: Raw Retrieved Chunks")
+            for i, r in enumerate(results, start=1):
+                st.markdown(f"**Chunk {i}:**")
+                st.code(r.get("text", "")[:1000])  # limit preview to 1000 chars
