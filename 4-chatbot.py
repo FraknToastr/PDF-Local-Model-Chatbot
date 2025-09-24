@@ -3,6 +3,7 @@ import logging
 import streamlit as st
 import lancedb
 import torch
+import subprocess
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sentence_transformers import SentenceTransformer
 
@@ -18,12 +19,20 @@ logger = logging.getLogger(__name__)
 
 # --- Streamlit setup ---
 st.set_page_config(page_title="Council Meeting Chatbot", page_icon="🏛️", layout="wide")
-st.markdown("<h1 style='text-align:center; color:white;'>Council Meeting Chatbot</h1>", unsafe_allow_html=True)
+st.markdown(
+    "<h1 style='text-align:center; color:white;'>Council Meeting Chatbot</h1>",
+    unsafe_allow_html=True
+)
 
 # --- Load LanceDB ---
 logger.info(f"📦 Connecting to LanceDB at {DB_DIR}...")
 db = lancedb.connect(DB_DIR)
-table = db.open_table(TABLE_NAME)
+
+try:
+    table = db.open_table(TABLE_NAME)
+except Exception as e:
+    st.error(f"❌ Could not open LanceDB table `{TABLE_NAME}`. Error: {e}")
+    st.stop()
 
 # --- Load embedding model ---
 logger.info(f"🔍 Loading embedding model: {DEFAULT_MODEL}")
@@ -35,11 +44,23 @@ logger.info(f"✅ Embedding model loaded (dim={embed_dim})")
 table_dim = None
 for field in table.schema:
     if field.name == "vector":
-        table_dim = field.type.list_size
-        break
+        try:
+            table_dim = field.type.list_size  # FixedSizeList
+        except Exception:
+            pass
 
 if table_dim and table_dim != embed_dim:
     st.error(f"❌ Embedding dimension mismatch! Table={table_dim}, Model={embed_dim}")
+
+    if st.button("🔄 Rebuild LanceDB Now (run 3-build-lancedb.py)"):
+        try:
+            subprocess.run(
+                ["python", "3-build-lancedb.py"],
+                check=True
+            )
+            st.success("✅ LanceDB rebuilt successfully. Please restart the chatbot.")
+        except subprocess.CalledProcessError as e:
+            st.error(f"❌ Failed to rebuild LanceDB: {e}")
     st.stop()
 
 # --- Load LLM ---
@@ -60,9 +81,11 @@ with st.sidebar:
     top_k = st.slider("Top-K (context docs)", 1, 10, 5)
     temperature = st.slider("Temperature", 0.1, 2.0, 0.7)
     max_tokens = st.slider("Max new tokens", 50, 1000, 300)
+    if st.button("🔁 Reset Conversation"):
+        st.session_state["messages"] = []
+        st.experimental_rerun()
 
-for msg in st.session_state["messages"]:
-    role, text = msg
+for role, text in st.session_state["messages"]:
     bubble_color = "#1e90ff" if role == "user" else "#2e8b57"
     st.markdown(
         f"<div style='background-color:{bubble_color}; padding:10px; border-radius:10px; color:white; margin:5px 0;'>{role}: {text}</div>",
@@ -102,6 +125,4 @@ Answer:"""
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     st.session_state["messages"].append(("assistant", answer))
-
-    # --- Rerun UI ---
-    st.rerun()
+    st.experimental_rerun()
