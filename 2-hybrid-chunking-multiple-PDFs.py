@@ -1,10 +1,13 @@
 import os
 import pickle
 import logging
+import re
 from datetime import datetime
+
 from docling.document_converter import DocumentConverter, InputFormat
 from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline, PdfPipelineOptions
 from docling.chunking import HybridChunker
+
 import torch
 
 # --- Config ---
@@ -22,13 +25,30 @@ else:
     device = "cpu"
     logger.warning("⚠️ No GPU detected, using CPU")
 
+
 def extract_date_from_path(path: str):
+    """
+    Try to parse a date from a filename like:
+    data/2025/04_April/Agenda_Frontsheet_1259.pdf
+    → returns '2025-04-01' as a fallback
+    """
     parts = path.replace("\\", "/").split("/")
+    date_val = None
+
     if len(parts) >= 3:
-        year, month_part = parts[-3], parts[-2]
-        if year.isdigit() and month_part[:2].isdigit():
-            return f"{year}-{month_part[:2]}-01"
-    return None
+        year = parts[-3]
+        month_part = parts[-2]
+        month_match = re.match(r"(\d{2})_", month_part)
+        if year.isdigit() and month_match:
+            yyyy = int(year)
+            mm = int(month_match.group(1))
+            try:
+                date_val = datetime(yyyy, mm, 1).strftime("%Y-%m-%d")
+            except Exception:
+                date_val = None
+
+    return date_val
+
 
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
@@ -37,12 +57,12 @@ def process_pdfs_for_chunking():
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter({InputFormat.PDF: pipeline})
 
-    # ✅ Smaller chunks for agendas, with overlap
-    chunker = HybridChunker(chunk_size=350, overlap=60, use_titles=True)
+    # ✅ Hybrid chunker
+    chunker = HybridChunker(chunk_size=500, overlap=50)
 
     logger.info("Initialization successful.")
 
-    # Load existing chunks
+    # Load existing chunks if any
     if os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, "rb") as f:
             all_chunks = pickle.load(f)
@@ -50,25 +70,30 @@ def process_pdfs_for_chunking():
     else:
         all_chunks = []
 
-    processed_files = {c["metadata"].get("source_file") for c in all_chunks if "metadata" in c}
+    processed_files = {c.get("source_file") for c in all_chunks}
 
-    pdf_files = [
-        os.path.join(root, f)
-        for root, _, files in os.walk(DATA_DIR)
-        for f in files if f.lower().endswith(".pdf")
-    ]
+    # Scan for PDFs
+    logger.info(f"Scanning for PDF files in '{DATA_DIR}'...")
+    pdf_files = []
+    for root, _, files in os.walk(DATA_DIR):
+        for f in files:
+            if f.lower().endswith(".pdf"):
+                pdf_files.append(os.path.join(root, f))
+
     logger.info(f"Found {len(pdf_files)} PDF file(s).")
 
     for pdf_path in pdf_files:
         rel_path = os.path.relpath(pdf_path, DATA_DIR)
+
         if rel_path in processed_files:
             logger.info(f"Skipping already processed file: {rel_path}")
             continue
 
         logger.info(f"Processing new PDF: {rel_path}")
+
         try:
             result = converter.convert(pdf_path)
-            doc = result.document  # ✅ correct attribute
+            doc = result.document  # ✅ ConversionResult.document is the DoclingDocument
 
             chunks = chunker.chunk(doc)
 
@@ -76,19 +101,25 @@ def process_pdfs_for_chunking():
                 metadata = {
                     "source_file": rel_path,
                     "page_number": getattr(ch, "page_number", None),
-                    "date": extract_date_from_path(rel_path)
+                    "date": extract_date_from_path(rel_path),
                 }
-                all_chunks.append({"chunk": {"text": ch.text}, "metadata": metadata})
+                all_chunks.append({
+                    "vector": None,  # will be filled in Script 3
+                    "text": ch.text,
+                    **metadata
+                })
 
         except Exception as e:
             logger.error(f"Failed to process '{rel_path}': {e}")
             continue
 
-    # Save
+    # Save updated chunks
     with open(OUTPUT_FILE, "wb") as f:
         pickle.dump(all_chunks, f)
 
-    logger.info(f"✅ Saved {len(all_chunks)} chunks → {OUTPUT_FILE}")
+    logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
+    logger.info(f"✅ Wrote {len(all_chunks)} chunks → {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
