@@ -85,19 +85,28 @@ table = db.open_table(TABLE_NAME)
 st.title("📄 PDF Local Model Chatbot")
 
 user_query = st.text_input("Ask a question about the documents:")
-if user_query:
-    # Embed query
-    query_embedding = embed_func([user_query])[0]
 
-    # Retrieve relevant chunks
+if user_query:
+    # Progress bar
+    progress = st.progress(0, text="🔎 Embedding query...")
+
+    # Step 1: Embed query
+    query_embedding = embed_func([user_query])[0]
+    progress.progress(25, text="📂 Searching LanceDB...")
+
+    # Step 2: Retrieve relevant chunks
     results = table.search(query_embedding).limit(top_k).to_list()
+    progress.progress(50, text="📝 Preparing context...")
 
     # Build context string
     context = "\n\n".join([r["text"] for r in results])
 
-    # Run chat model
+    # Step 3: Run chat model
+    progress.progress(75, text="🤖 Generating answer...")
     prompt = f"Answer the question based only on the context below:\n\n{context}\n\nQuestion: {user_query}\nAnswer:"
     response = chat_pipe(prompt, max_new_tokens=512, do_sample=True, temperature=0.3)[0]["generated_text"]
+
+    progress.progress(100, text="✅ Done!")
 
     # Display response
     st.subheader("💬 Answer")
