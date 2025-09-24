@@ -1,8 +1,9 @@
 import streamlit as st
 import lancedb
 import torch
-from transformers import AutoTokenizer, AutoModel, pipeline
+from transformers import AutoTokenizer, AutoModel, pipeline, TextIteratorStreamer
 from typing import List
+import threading
 
 # --- Config ---
 DB_URI = "data/lancedb_data"
@@ -60,18 +61,18 @@ def embed_func(texts: List[str]):
         embeddings = embed_model(**inputs).last_hidden_state[:, 0, :]
     return embeddings.cpu().to(torch.float32).numpy()
 
-# --- Load chat model dynamically ---
+# --- Load chat model dynamically (no pipeline, manual streaming) ---
 @st.cache_resource
 def load_chat_model(model_id: str):
-    chat_pipe = pipeline(
-        "text-generation",
-        model=model_id,
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModel.from_pretrained(
+        model_id,
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device_map="auto" if torch.cuda.is_available() else None
     )
-    return chat_pipe
+    return tokenizer, model
 
-chat_pipe = load_chat_model(chat_model_choice)
+chat_tokenizer, chat_model = load_chat_model(chat_model_choice)
 
 # --- Connect to LanceDB ---
 db = lancedb.connect(DB_URI)
@@ -101,16 +102,33 @@ if user_query:
     # Build context string
     context = "\n\n".join([r["text"] for r in results])
 
-    # Step 3: Run chat model
-    progress.progress(75, text="🤖 Generating answer...")
+    # Step 3: Prepare generation
     prompt = f"Answer the question based only on the context below:\n\n{context}\n\nQuestion: {user_query}\nAnswer:"
-    response = chat_pipe(prompt, max_new_tokens=512, do_sample=True, temperature=0.3)[0]["generated_text"]
+
+    streamer = TextIteratorStreamer(chat_tokenizer, skip_prompt=True, skip_special_tokens=True)
+    generation_kwargs = dict(
+        inputs=chat_tokenizer(prompt, return_tensors="pt").to(device),
+        streamer=streamer,
+        max_new_tokens=512,
+        do_sample=True,
+        temperature=0.3,
+    )
+
+    thread = threading.Thread(target=chat_model.generate, kwargs=generation_kwargs)
+    thread.start()
+
+    progress.progress(75, text="🤖 Generating answer...")
+
+    # --- Streaming output ---
+    st.subheader("💬 Answer")
+    answer_placeholder = st.empty()
+    streamed_text = ""
+
+    for new_text in streamer:
+        streamed_text += new_text
+        answer_placeholder.markdown(streamed_text)
 
     progress.progress(100, text="✅ Done!")
-
-    # Display response
-    st.subheader("💬 Answer")
-    st.write(response)
 
     # Show sources
     with st.expander("📚 Sources"):
