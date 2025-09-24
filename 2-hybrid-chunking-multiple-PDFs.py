@@ -3,7 +3,7 @@ import pickle
 import logging
 import re
 from datetime import datetime
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, InputFormat
 from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline, PdfPipelineOptions
 from docling.chunking import HybridChunker
 import torch
@@ -52,7 +52,7 @@ def process_pdfs_for_chunking():
     # ✅ Proper pipeline initialization with PdfPipelineOptions
     pipeline_options = PdfPipelineOptions()
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
-    converter = DocumentConverter(pipeline)
+    converter = DocumentConverter({InputFormat.PDF: pipeline})
 
     # ✅ Hybrid chunker
     chunker = HybridChunker(chunk_size=500, overlap=50)
