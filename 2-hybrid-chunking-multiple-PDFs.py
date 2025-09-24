@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+2-hybrid-chunking-multiple-PDFs-clean.py
+- Processes PDFs into cleaned chunks
+- Removes ceremonial filler (prayers, pledges, silences)
+- Deduplicates repeated lines
+- Adds metadata flag for member lists
+"""
+
 import os
 import pickle
 import logging
@@ -23,96 +32,61 @@ else:
     device = "cpu"
     logger.warning("⚠️ No GPU detected, using CPU")
 
-
 def extract_date_from_path(path: str):
-    """
-    Try to parse a date from a filename like:
-    data/2025/04_April/Agenda_Frontsheet_1259.pdf
-    → returns '2025-04-01' as a fallback
-    """
+    """Extract year/month from filename path like data/2025/04_April/file.pdf"""
     parts = path.replace("\\", "/").split("/")
-    date_val = None
-
     if len(parts) >= 3:
         year = parts[-3]
         month_part = parts[-2]
-        month_match = re.match(r"(\d{2})_", month_part)
-        if year.isdigit() and month_match:
-            yyyy = int(year)
-            mm = int(month_match.group(1))
+        match = re.match(r"(\d{2})_", month_part)
+        if year.isdigit() and match:
+            yyyy, mm = int(year), int(match.group(1))
             try:
-                date_val = datetime(yyyy, mm, 1).strftime("%Y-%m-%d")
+                return datetime(yyyy, mm, 1).strftime("%Y-%m-%d")
             except Exception:
-                date_val = None
+                return None
+    return None
 
-    return date_val
+def clean_text(text: str) -> str:
+    """Remove ceremonial filler and deduplicate repeated lines."""
+    if not text:
+        return ""
 
-
-def is_boilerplate(text: str) -> bool:
-    """
-    Detect ceremonial/boilerplate phrases that repeat in every agenda.
-    """
-    boilerplate_patterns = [
-        r"the lord mayor will state",   # prayers, pledges
-        r"council acknowledges that we are meeting on traditional country",  # acknowledgment of country
-        r"minutes silence",             # memorial silences
-        r"© \d{4} city of adelaide",    # copyright footer
+    # Strip common ceremonial filler
+    patterns = [
+        r"The Lord Mayor will state:.*?(respecting the opinions of others\.')",
+        r"May we in this meeting.*?(those we serve\.')",
+        r"Council acknowledges that we are meeting on traditional Country.*?(today\.')",
+        r"A minute of silence.*?(observed\.)",
     ]
-    lowered = text.lower()
-    for pat in boilerplate_patterns:
-        if re.search(pat, lowered):
-            return True
-    return False
+    for pat in patterns:
+        text = re.sub(pat, "", text, flags=re.DOTALL | re.IGNORECASE)
 
+    # Deduplicate repeated lines inside one chunk
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    seen = set()
+    deduped = []
+    for ln in lines:
+        if ln not in seen:
+            deduped.append(ln)
+            seen.add(ln)
 
-def deduplicate_chunks(chunks):
-    """
-    Remove duplicate/boilerplate chunks across all docs.
-    """
-    seen_texts = set()
-    filtered = []
-    skipped = 0
-
-    for c in chunks:
-        text = c["text"].strip()
-        norm = re.sub(r"\s+", " ", text.lower())
-
-        # Skip if boilerplate or already seen
-        if is_boilerplate(norm) or norm in seen_texts:
-            skipped += 1
-            continue
-
-        seen_texts.add(norm)
-        filtered.append(c)
-
-    logger.info(f"🧹 Deduplicated chunks: kept {len(filtered)}, removed {skipped}")
-    return filtered
-
+    return "\n".join(deduped)
 
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
 
-    # ✅ Proper pipeline initialization
     pipeline_options = PdfPipelineOptions()
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter({InputFormat.PDF: pipeline})
-
-    # ✅ Hybrid chunker
     chunker = HybridChunker(chunk_size=500, overlap=50)
 
     logger.info("Initialization successful.")
 
-    # Load existing chunks if any
-    if os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "rb") as f:
-            all_chunks = pickle.load(f)
-        logger.info(f"Loaded {len(all_chunks)} existing chunks from {OUTPUT_FILE}.")
-    else:
-        all_chunks = []
+    all_chunks = []
+    processed_files = set()
 
-    processed_files = {c.get("metadata", {}).get("source_file") for c in all_chunks if "metadata" in c}
-
-    # Scan for PDFs
+    # Scan PDFs
     logger.info(f"Scanning for PDF files in '{DATA_DIR}'...")
     pdf_files = []
     for root, _, files in os.walk(DATA_DIR):
@@ -122,8 +96,6 @@ def process_pdfs_for_chunking():
 
     logger.info(f"Found {len(pdf_files)} PDF file(s).")
 
-    new_chunks = []
-
     for pdf_path in pdf_files:
         rel_path = os.path.relpath(pdf_path, DATA_DIR)
 
@@ -132,41 +104,37 @@ def process_pdfs_for_chunking():
             continue
 
         logger.info(f"Processing new PDF: {rel_path}")
-
         try:
             result = converter.convert(pdf_path)
-            doc = result.document  # ✅ Proper DoclingDocument
+            doc = result.document
 
             chunks = chunker.chunk(doc)
 
             for ch in chunks:
+                cleaned = clean_text(ch.text)
+                if not cleaned.strip():
+                    continue
+
                 metadata = {
                     "source_file": rel_path,
                     "page_number": getattr(ch, "page_number", None),
-                    "date": extract_date_from_path(rel_path)
+                    "date": extract_date_from_path(rel_path),
+                    "is_member_list": (
+                        "lord mayor" in cleaned.lower() or "councillor" in cleaned.lower()
+                    ),
                 }
-                new_chunks.append({"text": ch.text, "metadata": metadata})
+                all_chunks.append({"text": cleaned, "metadata": metadata})
 
         except Exception as e:
-            logger.error(f"Failed to process '{rel_path}': {e}")
+            logger.error(f"❌ Failed to process '{rel_path}': {e}")
             continue
-
-    # Deduplicate
-    all_chunks.extend(deduplicate_chunks(new_chunks))
 
     # Save updated chunks
     with open(OUTPUT_FILE, "wb") as f:
         pickle.dump(all_chunks, f)
 
-    logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
-    logger.info(f"✅ Wrote {len(all_chunks)} chunks → {OUTPUT_FILE}")
-
-    if os.path.exists(OUTPUT_FILE):
-        size_kb = os.path.getsize(OUTPUT_FILE) / 1024
-        logger.info(f"📦 File created at {OUTPUT_FILE} ({size_kb:.1f} KB)")
-    else:
-        logger.error(f"❌ Expected output file missing: {OUTPUT_FILE}")
-
+    logger.info(f"✅ Chunks saved successfully! Total: {len(all_chunks)}")
+    logger.info(f"📦 File written to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
