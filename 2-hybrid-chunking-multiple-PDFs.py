@@ -67,20 +67,17 @@ def process_pdfs_for_chunking():
         )
         return
 
-    try:
-        # Detect GPU availability
-        if torch.cuda.is_available():
-            device = "cuda"
-            logger.info("🚀 Using GPU (CUDA) for Docling")
-        else:
-            device = "cpu"
-            logger.warning("⚠️ No GPU detected, using CPU")
+    # Detect GPU availability
+    if torch.cuda.is_available():
+        torch.set_default_device("cuda")
+        logger.info("🚀 Using GPU (CUDA) for Docling")
+    else:
+        logger.warning("⚠️ No GPU detected, using CPU")
 
-        # Initialize docling components with GPU/CPU setting
+    try:
+        # Initialize docling components
         logger.info("Initializing document converter and chunker...")
-        converter = DocumentConverter(
-            pipeline_options={"device": 0 if device == "cuda" else -1}
-        )
+        converter = DocumentConverter()  # No pipeline_options for your version
         chunker = HybridChunker(max_tokens=MAX_CHUNK_TOKENS)
         logger.info("Initialization successful.")
     except ImportError as e:
@@ -166,4 +163,3 @@ def process_pdfs_for_chunking():
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
-
