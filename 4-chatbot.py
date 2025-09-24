@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 DB_DIR = "data/lancedb_data"
 TABLE_NAME = "adelaide_agendas"
 VECTOR_COL = "vector"
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  # local instruct model
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  # local LLM
 EMBED_MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
 
 # --- Load embedding model ---
@@ -67,7 +67,7 @@ def main():
             return
         table = db.open_table(TABLE_NAME)
 
-        # Search LanceDB ✅ explicit vector_column_name
+        # Search LanceDB ✅ explicit vector column
         top_k = 5
         results = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(top_k).to_list()
 
@@ -90,7 +90,10 @@ def main():
         # Show sources
         with st.expander("📂 Show Sources"):
             for r in results:
-                st.markdown(f"- **{r.get('source_file')}** (p{r.get('page_number')}, {r.get('date')})")
+                st.markdown(
+                    f"- **{r.get('source_file')}** "
+                    f"(page {r.get('page_number')}, date: {r.get('date')})"
+                )
 
 if __name__ == "__main__":
     main()
