@@ -1,129 +1,170 @@
 import os
 import logging
-import lancedb
 import streamlit as st
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import lancedb
 from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 # --- Config ---
-DATA_DIR = "data"
-DB_PATH = os.path.join(DATA_DIR, "lancedb_data")
+DB_PATH = "data/lancedb_data"
 TABLE_NAME = "adelaide_agendas"
-
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-GENERATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+LLM_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
 
+# Logo + branding
 LOGO_URL = "https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg"
+APP_TITLE = "Council Meeting Chatbot"
 
+# Boosted councillor names
+BOOST_TERMS = [
+    "Lord Mayor", "Jane Lomax-Smith", "Councillor",
+    "Abrahimzadeh", "Couros", "Davis", "Giles",
+    "Martin", "Siebentritt", "Snape", "Cabada"
+]
+
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Sidebar ---
-st.sidebar.image(LOGO_URL, width=200)
-st.sidebar.title("⚙️ Settings")
+# --- Load Embedding Model ---
+@st.cache_resource
+def load_embedder():
+    logger.info(f"Load pretrained SentenceTransformer: {DEFAULT_MODEL}")
+    model = SentenceTransformer(DEFAULT_MODEL, device="cuda" if torch.cuda.is_available() else "cpu")
+    return model
 
-embedding_model_name = st.sidebar.selectbox(
-    "Embedding model",
-    ["sentence-transformers/all-MiniLM-L6-v2", "mixedbread-ai/mxbai-embed-large-v1"],
-    index=0,
-)
+embedder = load_embedder()
 
-top_k = st.sidebar.slider("Top-K results", 1, 10, 5)
-temperature = st.sidebar.slider("Temperature", 0.1, 2.0, 0.7)
-max_new_tokens = st.sidebar.slider("Max new tokens", 50, 500, 200)
-suppress_context = st.sidebar.checkbox("Suppress context display", value=True)
+# --- Load LanceDB ---
+@st.cache_resource
+def load_table():
+    db = lancedb.connect(DB_PATH)
+    return db.open_table(TABLE_NAME)
 
-if st.sidebar.button("Reset Conversation"):
-    st.session_state["history"] = []
-    st.rerun()
+table = load_table()
 
-# --- Title ---
+# --- Load LLM ---
+@st.cache_resource
+def load_llm():
+    tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
+    model = AutoModelForCausalLM.from_pretrained(
+        LLM_MODEL_ID,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto"
+    )
+    return tokenizer, model
+
+tokenizer, model = load_llm()
+
+# --- UI ---
+st.set_page_config(page_title=APP_TITLE, page_icon="🏛️", layout="wide")
 st.markdown(
     f"""
-    <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
-        <img src="{LOGO_URL}" alt="City of Adelaide" width="60">
-        <h1 style="color: white; margin: 0;">Council Meeting Chatbot</h1>
-    </div>
+    <style>
+        .stApp {{
+            background-color: #0e1117;
+            color: #fafafa;
+        }}
+        .user-bubble {{
+            background-color: #1e90ff;
+            color: white;
+            padding: 10px;
+            border-radius: 12px;
+            margin: 5px 0;
+            text-align: right;
+            max-width: 80%;
+            margin-left: auto;
+        }}
+        .bot-bubble {{
+            background-color: #2c2c2c;
+            color: #fafafa;
+            padding: 10px;
+            border-radius: 12px;
+            margin: 5px 0;
+            text-align: left;
+            max-width: 80%;
+            margin-right: auto;
+        }}
+    </style>
     """,
     unsafe_allow_html=True,
 )
 
-# --- Connect DB ---
-db = lancedb.connect(DB_PATH)
-table = db.open_table(TABLE_NAME)
+st.image(LOGO_URL, width=180)
+st.title(APP_TITLE)
 
-# --- Load models ---
-@st.cache_resource
-def load_models():
-    embed_model = SentenceTransformer(embedding_model_name, device="cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(GENERATION_MODEL)
-    model = AutoModelForCausalLM.from_pretrained(
-        GENERATION_MODEL,
-        torch_dtype="auto",
-        device_map="auto"
-    )
-    return embed_model, tokenizer, model
+# Reset button
+if st.button("Reset Conversation"):
+    st.session_state["messages"] = []
 
-import torch
-embed_model, tokenizer, model = load_models()
+# Session state
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
 
-# --- Chat input ---
-user_query = st.chat_input("Ask about Adelaide Council meetings...")
+# --- Boosted Search ---
+def boosted_search(query, top_k=5):
+    q_embed = embedder.encode([query])[0]
 
-if "history" not in st.session_state:
-    st.session_state["history"] = []
+    # Normal vector search
+    results = table.search(q_embed, vector_column_name="vector").limit(top_k * 2).to_list()
 
-if user_query:
-    # Embed query
-    query_embedding = embed_model.encode(user_query).tolist()
-    results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
+    # Boost scoring
+    boosted_results = []
+    for r in results:
+        score = r["_distance"] * -1  # LanceDB returns distance, lower is better
+        text = r.get("text", "")
+        meta = r.get("metadata", {})
 
-    # Build context string
-    context = "\n\n".join([r.get("text", "") for r in results]) if results else "No context found."
+        # Boost councillor/member list
+        if meta.get("is_member_list"):
+            score += 2.0
 
-    # Prompt
-    prompt = f"""Answer factually based only on the following context:
-{context}
+        # Boost if query contains councillor names
+        for term in BOOST_TERMS:
+            if term.lower() in query.lower() or term.lower() in text.lower():
+                score += 1.0
 
-Question: {user_query}
-Answer:"""
+        boosted_results.append((score, text))
 
-    # Generate
+    # Sort by boosted score
+    boosted_results.sort(key=lambda x: x[0], reverse=True)
+    return [t for _, t in boosted_results[:top_k]]
+
+# --- Chat logic ---
+def generate_answer(prompt):
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=(temperature > 0.1),
+        max_new_tokens=300,
+        do_sample=True,
+        top_k=50,
+        temperature=0.7
     )
-    raw_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # --- Extract only the answer part ---
-    response = None
-    if "Answer:" in raw_response:
-        response = raw_response.split("Answer:")[-1].strip()
-        response = "Answer: " + response  # keep prefix
-    else:
-        # fallback: take the last line
-        sentences = raw_response.strip().split("\n")
-        if sentences:
-            response = sentences[-1].strip()
-        else:
-            response = raw_response.strip()
+# --- Chat UI ---
+user_query = st.chat_input("Ask about Council Meetings...")
 
-    # Save clean Q&A only
-    st.session_state["history"].append(("user", user_query))
-    st.session_state["history"].append(("bot", response))
+if user_query:
+    # Save user bubble
+    st.session_state["messages"].append(("user", user_query))
 
-# --- Display history ---
-for role, text in st.session_state["history"]:
+    # Context from boosted search
+    hits = boosted_search(user_query, top_k=5)
+    context = "\n\n".join(hits) if hits else "No relevant context found in the agendas."
+
+    # Strict grounding
+    prompt = f"Answer ONLY using the following council agenda context. If unclear, say 'I don’t know based on the available documents.'\n\nContext:\n{context}\n\nQuestion: {user_query}\nAnswer:"
+
+    answer = generate_answer(prompt)
+
+    # Save bot bubble
+    st.session_state["messages"].append(("bot", answer))
+
+# Render conversation
+for role, msg in st.session_state["messages"]:
     if role == "user":
-        st.markdown(
-            f"<div style='background-color: #1a1c23; color: white; padding: 10px; border-radius: 10px; float: right; clear: both; margin: 5px 0; max-width: 70%; text-align: right;'>{text}</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<div class='user-bubble'>{msg}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(
-            f"<div style='background-color: #0b5ed7; color: white; padding: 10px; border-radius: 10px; float: left; clear: both; margin: 5px 0; max-width: 70%;'>{text}</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<div class='bot-bubble'>{msg}</div>", unsafe_allow_html=True)
