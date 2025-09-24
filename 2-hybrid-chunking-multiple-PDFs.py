@@ -24,8 +24,7 @@ else:
     logger.warning("⚠️ No GPU detected, using CPU")
 
 def extract_date_from_path(path: str):
-    """
-    Try to parse a date from a filename like:
+    """Try to parse a date from a filename like:
     data/2025/04_April/Agenda_Frontsheet_1259.pdf
     → returns '2025-04-01' as a fallback
     """
@@ -49,12 +48,10 @@ def extract_date_from_path(path: str):
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
 
-    # ✅ Proper pipeline initialization
     pipeline_options = PdfPipelineOptions()
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter({InputFormat.PDF: pipeline})
 
-    # ✅ Hybrid chunker
     chunker = HybridChunker(chunk_size=500, overlap=50)
 
     logger.info("Initialization successful.")
@@ -89,17 +86,22 @@ def process_pdfs_for_chunking():
         logger.info(f"Processing new PDF: {rel_path}")
 
         try:
-            # ✅ FIX: unwrap ConversionResult into a DoclingDocument
             result = converter.convert(pdf_path)
-            doc = result.output   # <--- FIX HERE
+            doc = result.document   # ✅ confirmed correct
 
+            # Handle list_iterator issue
+            if hasattr(doc, "__iter__") and not hasattr(doc, "__len__"):
+                doc = list(doc)
+
+            # ✅ Chunk the doc
             chunks = chunker.chunk(doc)
+            logger.info(f"Produced {len(chunks)} chunks from {rel_path}")
 
             for ch in chunks:
                 metadata = {
                     "source_file": rel_path,
                     "page_number": getattr(ch, "page_number", None),
-                    "date": extract_date_from_path(rel_path)
+                    "date": extract_date_from_path(rel_path),
                 }
                 all_chunks.append({"chunk": {"text": ch.text}, "metadata": metadata})
 
@@ -114,12 +116,9 @@ def process_pdfs_for_chunking():
     logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
     logger.info(f"✅ Wrote {len(all_chunks)} chunks → {OUTPUT_FILE}")
 
-    # Extra check: confirm file exists
     if os.path.exists(OUTPUT_FILE):
         size_kb = os.path.getsize(OUTPUT_FILE) / 1024
         logger.info(f"📦 File created at {OUTPUT_FILE} ({size_kb:.1f} KB)")
-    else:
-        logger.error(f"❌ Expected output file missing: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
