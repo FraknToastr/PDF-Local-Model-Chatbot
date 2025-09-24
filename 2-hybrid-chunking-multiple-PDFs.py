@@ -117,12 +117,12 @@ def process_pdfs_for_chunking():
                 logger.info(f"Produced {len(chunks)} chunks from {rel_path}")
 
                 if chunks:
-                    first_text = getattr(chunks[0], "text", None) or chunks[0].get("text", "")
+                    first_text = getattr(chunks[0], "text", "")
                     logger.info(f"🔎 First chunk preview ({rel_path}): {first_text[:200]!r}")
 
                 for ch in chunks:
-                    text = getattr(ch, "text", None) or ch.get("text")
-                    page_number = getattr(ch, "page_number", None) or ch.get("page_number")
+                    text = getattr(ch, "text", None)
+                    page_number = getattr(ch, "page_number", None)
                     if not text:
                         continue
                     all_chunks.append({
