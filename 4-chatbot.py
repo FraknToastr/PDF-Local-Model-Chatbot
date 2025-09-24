@@ -148,5 +148,6 @@ if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == 
     if "Answer:" in answer:
         answer = answer.split("Answer:")[-1].strip()
 
-    st.session_state["messages"].append({"role": "assistant", "content": f"Answer: {answer}"})
-    st.chat_message("assistant").markdown(f"Answer: {answer}")
+    # Save + show in separate bubble
+    st.session_state["messages"].append({"role": "assistant", "content": answer})
+    st.chat_message("assistant").markdown(answer)
