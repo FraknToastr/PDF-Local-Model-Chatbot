@@ -83,8 +83,7 @@ def main(model_id: str):
 
     logger.info(f"Starting from chunk {existing_count} / {total_chunks}")
 
-    # --- Insert embeddings ---
-    records = []
+    # --- Insert embeddings batch by batch ---
     batch_size = 32
     for i in range(existing_count, total_chunks, batch_size):
         batch = all_chunks[i:i+batch_size]
@@ -99,6 +98,8 @@ def main(model_id: str):
             metas.append(c.get("metadata", {}))
 
         embeddings = embed_func(texts, tokenizer, model, device)
+
+        records = []
         for j, text in enumerate(texts):
             records.append({
                 "vector": embeddings[j],
@@ -106,12 +107,11 @@ def main(model_id: str):
                 "metadata": metas[j]
             })
 
+        # Write batch to LanceDB immediately (saves progress!)
         table.add(records)
-        records = []  # reset buffer
+        logger.info(f"✅ Saved batch {i // batch_size + 1} → processed {i+len(batch)} / {total_chunks} chunks")
 
-        logger.info(f"Processed {i+len(batch)} / {total_chunks} chunks")
-
-    logger.info("✅ Ingestion complete!")
+    logger.info("🎉 Ingestion complete!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build LanceDB index from PDF chunks.")
