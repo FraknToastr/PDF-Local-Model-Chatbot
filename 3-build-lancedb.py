@@ -1,62 +1,73 @@
 import os
 import pickle
 import logging
-
 import lancedb
 import pyarrow as pa
-from sentence_transformers import SentenceTransformer
-
 import torch
+from sentence_transformers import SentenceTransformer
 
 # --- Config ---
 DATA_DIR = "data"
 CHUNKS_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
 DB_DIR = os.path.join(DATA_DIR, "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Device ---
-device = "cuda" if torch.cuda.is_available() else "cpu"
-if device == "cuda":
-    logger.info("🚀 Using GPU for embeddings")
-else:
-    logger.warning("⚠️ Using CPU for embeddings")
+def main():
+    # --- Check GPU ---
+    if torch.cuda.is_available():
+        device = "cuda"
+        logger.info(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = "cpu"
+        logger.warning("⚠️ No GPU detected, using CPU")
 
+    # --- Load embedding model ---
+    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+    embedder = SentenceTransformer(EMBEDDING_MODEL, device=device)
 
-def main(embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"):
+    # --- Load chunks ---
     if not os.path.exists(CHUNKS_FILE):
-        logger.error(f"❌ No chunks file found at {CHUNKS_FILE}. Run script 2 first.")
+        logger.error(f"❌ Missing chunks file: {CHUNKS_FILE}. Run script 2 first.")
         return
 
     with open(CHUNKS_FILE, "rb") as f:
         chunks = pickle.load(f)
 
-    if not chunks:
-        logger.error("❌ No chunks found. Nothing to index.")
-        return
-
     logger.info(f"Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
 
-    # --- Load embedder ---
-    embedder = SentenceTransformer(embedding_model_name, device=device)
-
     # --- Generate embeddings ---
-    texts = [c["text"] for c in chunks]
-    embeddings = embedder.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+    records = []
+    for c in chunks:
+        text = c.get("text", "")
+        if not text.strip():
+            continue
 
-    # --- Attach vectors back into chunks ---
-    for c, emb in zip(chunks, embeddings):
-        c["vector"] = emb.tolist()
+        emb = embedder.encode(text, convert_to_numpy=True).tolist()
+        records.append({
+            "vector": emb,
+            "text": text,
+            "source_file": c.get("source_file"),
+            "page_number": c.get("page_number"),
+            "date": c.get("date")
+        })
 
-    # --- Define schema for LanceDB ---
+    logger.info(f"Prepared {len(records)} records with embeddings.")
+
+    if not records:
+        logger.error("❌ No valid chunks to insert into LanceDB.")
+        return
+
+    # --- Define schema ---
     schema = pa.schema([
-        ("vector", pa.list_(pa.float32(), len(embeddings[0]))),
-        ("text", pa.string()),
-        ("source_file", pa.string()),
-        ("page_number", pa.int32()),
-        ("date", pa.string()),
+        pa.field("vector", pa.list_(pa.float32(), len(records[0]["vector"]))),
+        pa.field("text", pa.string()),
+        pa.field("source_file", pa.string()),
+        pa.field("page_number", pa.int32()),
+        pa.field("date", pa.string())
     ])
 
     # --- Connect to LanceDB ---
@@ -67,13 +78,13 @@ def main(embedding_model_name="sentence-transformers/all-MiniLM-L6-v2"):
         db.drop_table(TABLE_NAME)
 
     logger.info(f"Creating new table with schema: {TABLE_NAME}")
-    table = db.create_table(TABLE_NAME, schema=schema, data=[])
+    table = db.create_table(TABLE_NAME, schema=schema)  # ✅ FIXED (no empty data=[])
 
-    # --- Insert chunks ---
-    table.add(chunks)
+    # --- Insert data ---
+    table.add(records)
 
-    logger.info(f"✅ Inserted {len(chunks)} rows into table '{TABLE_NAME}'")
-
+    logger.info(f"✅ Inserted {len(records)} rows into table '{TABLE_NAME}'")
+    logger.info(f"📋 Final schema: {table.schema}")
 
 if __name__ == "__main__":
     main()
