@@ -1,109 +1,106 @@
-import os
-import logging
 import streamlit as st
 import lancedb
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
+import torch
 
 # --- Config ---
-DB_DIR = os.path.join("data", "lancedb_data")
+DB_DIR = "data/lancedb_data"
 TABLE_NAME = "adelaide_agendas"
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-LLM_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-# --- Load LanceDB ---
+# --- Load DB ---
 db = lancedb.connect(DB_DIR)
-if TABLE_NAME not in db.table_names():
-    st.error(f"❌ Table '{TABLE_NAME}' not found in LanceDB. Run Script 3 first.")
-    st.stop()
-
 table = db.open_table(TABLE_NAME)
-schema = table.schema
-logger.info(f"📋 Opened table '{TABLE_NAME}' with schema: {schema}")
 
-# --- Streamlit UI ---
-st.title("📄 PDF Local Model Chatbot")
-
-with st.sidebar:
-    st.header("⚙️ Settings")
-    embedding_model_name = st.selectbox(
-        "Embedding model",
-        ["sentence-transformers/all-MiniLM-L6-v2", "mixedbread-ai/mxbai-embed-large-v1"],
-        index=0 if DEFAULT_EMBEDDING_MODEL == "sentence-transformers/all-MiniLM-L6-v2" else 1,
+# --- Load Models ---
+@st.cache_resource
+def load_models(embed_model_id, lm_model_id):
+    embedder = SentenceTransformer(embed_model_id)
+    tokenizer = AutoTokenizer.from_pretrained(lm_model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        lm_model_id,
+        device_map="auto",
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
     )
-    top_k = st.slider("Top-K Results", 1, 20, 5)
-    temperature = st.slider("Temperature", 0.1, 1.5, 0.7)
-    max_new_tokens = st.slider("Max New Tokens", 64, 1024, 256)
-    suppress_context = st.checkbox("Suppress context (ignore PDFs)", value=False)
-    reset_chat = st.button("Reset Conversation")
+    return embedder, tokenizer, model
 
-# --- Session State ---
-if "history" not in st.session_state or reset_chat:
-    st.session_state.history = []
+# --- UI ---
+st.title("📄 Adelaide Agenda Chatbot")
+st.sidebar.header("⚙️ Settings")
 
-# --- Device selection ---
-if torch.cuda.is_available():
-    device = "cuda"
-    logger.info(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
-else:
-    device = "cpu"
-    logger.warning("⚠️ No GPU detected, using CPU")
-
-# --- Load embeddings ---
-embedder = SentenceTransformer(embedding_model_name, device=device)
-
-# --- Load LLM ---
-logger.info(f"Loading LLM: {LLM_MODEL}")
-tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
-model = AutoModelForCausalLM.from_pretrained(
-    LLM_MODEL,
-    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    device_map="auto"
+embed_model_id = st.sidebar.selectbox(
+    "Embedding model",
+    ["sentence-transformers/all-MiniLM-L6-v2", "mixedbread-ai/mxbai-embed-large-v1"],
+    index=0,
 )
+lm_model_id = st.sidebar.text_input("Language Model ID", "mistralai/Mistral-7B-Instruct-v0.2")
 
-# --- Chatbot loop ---
-user_input = st.text_input("💬 Ask a question:")
+top_k = st.sidebar.slider("Top-K Results", 1, 20, 5)
+temperature = st.sidebar.slider("Temperature", 0.1, 2.0, 0.7)
+max_new_tokens = st.sidebar.slider("Max new tokens", 64, 1024, 256)
+
+suppress_context = st.sidebar.checkbox("Suppress context (ignore PDFs)?", value=False)
+
+# Load models
+embedder, tokenizer, model = load_models(embed_model_id, lm_model_id)
+
+# Conversation state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if st.sidebar.button("🔄 Reset Conversation"):
+    st.session_state.messages = []
+
+# --- Chat ---
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+user_input = st.chat_input("Ask about Adelaide Agendas...")
 if user_input:
-    # Embed query
-    query_embedding = embedder.encode(user_input, convert_to_numpy=True).tolist()
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # Context retrieval
-    if not suppress_context:
-        try:
-            results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
-            context = "\n\n".join(
-                [r.get("text", "") for r in results if isinstance(r, dict) and "text" in r]
-            ) if results else "No context found."
-        except Exception as e:
-            logger.error(f"Vector search failed: {e}")
-            context = "No context (vector search failed)."
-    else:
-        context = ""
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
-    # Build prompt
-    prompt = f"Answer the question based only on the context.\n\nContext:\n{context}\n\nQuestion: {user_input}\nAnswer:"
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            context = "No context found."
+            if not suppress_context:
+                # Embed query
+                query_embedding = embedder.encode(user_input).tolist()
 
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=(temperature > 0.0),
-    )
+                # LanceDB search
+                results = table.search(query_embedding, vector_column_name="vector").limit(50).to_list()
 
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # --- NEW: Keyword boosting fallback ---
+                keywords = ["lord mayor", "councillor", "ceo", "mayor"]
+                boosted = []
+                for r in results:
+                    text = r.get("text", "").lower()
+                    score = 1.0  # baseline
+                    for kw in keywords:
+                        if kw in user_input.lower() and kw in text:
+                            score += 5.0  # boost heavily
+                    boosted.append((score, r))
 
-    # Save history
-    st.session_state.history.append((user_input, answer))
+                boosted.sort(key=lambda x: x[0], reverse=True)
+                top_results = [r for _, r in boosted[:top_k]]
 
-# --- Show conversation ---
-st.subheader("📝 Conversation")
-for i, (q, a) in enumerate(st.session_state.history):
-    st.markdown(f"**You:** {q}")
-    st.markdown(f"**Bot:** {a}")
-    st.markdown("---")
+                context = "\n\n".join([r.get("text", "") for r in top_results]) if top_results else "No context found."
+
+            # Build prompt
+            prompt = f"Answer the question based only on the context.\n\nContext:\n{context}\n\nQuestion: {user_input}\nAnswer:"
+
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=(temperature > 0.0),
+            )
+            answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+            st.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
