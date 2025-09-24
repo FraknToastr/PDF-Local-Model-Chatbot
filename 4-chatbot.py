@@ -1,78 +1,75 @@
 import os
+import re
 import streamlit as st
 import lancedb
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from sentence_transformers import SentenceTransformer
 
-# --- Config ---
-DB_PATH = "data/lancedb_data"
-TABLE_NAME = "adelaide_agendas"
-LOGO_URL = "https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg"
-
-# --- Streamlit Page Config ---
+# --------------------------
+# Page Config
+# --------------------------
 st.set_page_config(
     page_title="Council Meeting Chatbot",
-    page_icon="🗂️",
+    page_icon="https://www.cityofadelaide.com.au/common/base/img/favicon.ico",  # ✅ official favicon
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Inject dark theme CSS and chat bubbles
-st.markdown(
-    """
+# Dark theme styling + chat bubbles
+st.markdown("""
     <style>
-    body, .stApp { background-color: #0e1117; color: #f0f2f6; }
-    .user-bubble {
-        background-color: #1e2130;
-        color: white;
-        padding: 12px;
-        border-radius: 12px;
-        margin: 6px 0px;
-        max-width: 80%;
-        align-self: flex-end;
-    }
-    .bot-bubble {
-        background-color: #004AAD;
-        color: white;
-        padding: 12px;
-        border-radius: 12px;
-        margin: 6px 0px;
-        max-width: 80%;
-        align-self: flex-start;
-    }
-    .chat-container {
-        display: flex;
-        flex-direction: column;
-    }
+        body { background-color: #111; color: #eee; }
+        .user-bubble {
+            background-color: #2c2f38;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 12px;
+            margin: 4px 0;
+            text-align: right;
+            float: right;
+            clear: both;
+        }
+        .bot-bubble {
+            background-color: #0057b7;
+            color: #fff;
+            padding: 12px;
+            border-radius: 12px;
+            margin: 4px 0;
+            float: left;
+            clear: both;
+            max-width: 85%;
+        }
     </style>
-    """,
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
-# --- Header with Logo ---
-col1, col2 = st.columns([0.15, 0.85])
-with col1:
-    st.image(LOGO_URL, use_column_width=True)
-with col2:
-    st.title("Council Meeting Chatbot")
+# --------------------------
+# Logo
+# --------------------------
+st.image("https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg", width=200)
+st.title("Council Meeting Chatbot")
 
-st.write("Ask questions about the City of Adelaide council meeting documents.")
+# --------------------------
+# Load DB + Embedding Models
+# --------------------------
+DB_DIR = "data/lancedb_data"
+TABLE_NAME = "adelaide_agendas"
+VECTOR_COL = "vector"
 
-# --- Load DB ---
-db = lancedb.connect(DB_PATH)
+db = lancedb.connect(DB_DIR)
 table = db.open_table(TABLE_NAME)
 
-# --- Load Embedding Model ---
-@st.cache_resource
-def load_embedder():
-    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+embedding_models = {
+    "sentence-transformers/all-MiniLM-L6-v2": SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2"),
+    "mixedbread-ai/mxbai-embed-large-v1": SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
+}
+default_embed_model = "sentence-transformers/all-MiniLM-L6-v2"
 
-embedder = load_embedder()
-
-# --- Load LLM ---
+# --------------------------
+# Load LLM (local Hugging Face)
+# --------------------------
 @st.cache_resource
-def load_llm():
+def load_model():
     model_id = "mistralai/Mistral-7B-Instruct-v0.2"
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
@@ -82,68 +79,105 @@ def load_llm():
     )
     return tokenizer, model
 
-tokenizer, model = load_llm()
+tokenizer, model = load_model()
 
-# --- Load NER model for fallback ---
-@st.cache_resource
-def load_ner():
-    return pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
+# --------------------------
+# Deduplication helper
+# --------------------------
+def deduplicate_chunks(chunks):
+    seen = set()
+    unique = []
+    for ch in chunks:
+        text = ch.get("text", "").strip()
+        if not text:
+            continue
+        key = re.sub(r"\s+", " ", text)
+        if key not in seen:
+            seen.add(key)
+            unique.append(ch)
+    return unique
 
-ner_pipeline = load_ner()
+# --------------------------
+# Boost name/title matches
+# --------------------------
+def boost_name_chunks(results):
+    boosted = []
+    for r in results:
+        txt = r.get("text", "").lower()
+        if any(keyword in txt for keyword in ["lord mayor", "councillor", "dr", "ms", "mr"]):
+            r["_score"] = r.get("_score", 1.0) * 1.5
+        boosted.append(r)
+    return sorted(boosted, key=lambda x: -x.get("_score", 1.0))
 
-# --- Chat State ---
-if "history" not in st.session_state:
-    st.session_state["history"] = []
+# --------------------------
+# Chat State
+# --------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# --- Chat UI ---
-with st.container():
-    for entry in st.session_state["history"]:
-        role, text = entry
-        if role == "user":
-            st.markdown(f"<div class='chat-container'><div class='user-bubble'>{text}</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='chat-container'><div class='bot-bubble'>{text}</div></div>", unsafe_allow_html=True)
+# --------------------------
+# Sidebar Settings
+# --------------------------
+st.sidebar.header("⚙️ Settings")
+embed_model_choice = st.sidebar.selectbox("Embedding model", list(embedding_models.keys()), index=0)
+top_k = st.sidebar.slider("Top-K Chunks", 1, 10, 5)
+temperature = st.sidebar.slider("Temperature", 0.1, 1.5, 0.7)
+max_new_tokens = st.sidebar.slider("Max New Tokens", 50, 1000, 300)
+use_context = st.sidebar.checkbox("Restrict to PDF context only", value=True)
 
-# --- Input ---
-query = st.chat_input("Type your question here...")
-if query:
-    st.session_state["history"].append(("user", query))
+if st.sidebar.button("Reset Conversation"):
+    st.session_state.messages = []
 
-    # --- Embed Query ---
-    query_embedding = embedder.encode([query])[0]
+# --------------------------
+# Input Box
+# --------------------------
+user_input = st.chat_input("Ask a question about the council meeting PDFs...")
 
-    # --- Search Vector DB ---
-    results = table.search(query_embedding, vector_column_name="vector").limit(5).to_list()
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # --- Fallback: if no results or weak matches ---
-    if not results:
-        ents = ner_pipeline(query)
-        keywords = [ent["word"] for ent in ents if ent["entity_group"] in ["PER", "ORG", "LOC"]]
-        if keywords:
-            keyword = keywords[0]
-            results = table.search(query_embedding, vector_column_name="vector").filter(f"text CONTAINS '{keyword}'").limit(5).to_list()
+# --------------------------
+# Conversation Loop
+# --------------------------
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.markdown(f"<div class='user-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='bot-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
 
-    # --- Build Context ---
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+    query = st.session_state.messages[-1]["content"]
+
+    # Embed query
+    embedder = embedding_models[embed_model_choice]
+    query_embedding = embedder.encode(query).tolist()
+
+    # Search LanceDB
+    results = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(top_k).to_list()
+    results = deduplicate_chunks(results)
+    results = boost_name_chunks(results)
+
     context = "\n\n".join([r.get("text", "") for r in results]) if results else "No context found."
 
-    # --- Generate Answer ---
-    inputs = tokenizer(
-        f"Answer the following question strictly using the provided context.\n\nContext:\n{context}\n\nQuestion: {query}\nAnswer:",
-        return_tensors="pt"
-    ).to(model.device)
+    # Build prompt
+    if use_context and context != "No context found.":
+        prompt = f"Answer the question strictly using the provided context.\n\nContext:\n{context}\n\nQuestion: {query}\nAnswer:"
+    else:
+        prompt = f"Question: {query}\nAnswer:"
 
+    # Generate response
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
-        max_new_tokens=512,
-        temperature=0.7,
-        do_sample=True,
-        top_k=50
+        max_new_tokens=max_new_tokens,
+        do_sample=(temperature > 0.0),
+        temperature=temperature if temperature > 0.0 else 1.0,
     )
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Trim echo
+    if "Answer:" in response:
+        response = response.split("Answer:", 1)[-1].strip()
 
-    # --- Append Bot Response ---
-    st.session_state["history"].append(("bot", answer))
-
-    # --- Rerun to update UI ---
-    st.rerun()
+    st.session_state.messages.append({"role": "bot", "content": response})
+    st.markdown(f"<div class='bot-bubble'>{response}</div>", unsafe_allow_html=True)
