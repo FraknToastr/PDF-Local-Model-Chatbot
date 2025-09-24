@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from docling.document_converter import DocumentConverter
 from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+from docling.pipeline.standard_pdf_pipeline_options import StandardPdfPipelineOptions
 from docling.chunking import HybridChunker
 import torch
 
@@ -49,10 +50,12 @@ def extract_date_from_path(path: str):
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
 
-    # ✅ Your version: StandardPdfPipeline takes no explicit options
-    pipeline = StandardPdfPipeline()
+    # ✅ Proper pipeline initialization with options
+    pipeline_options = StandardPdfPipelineOptions()
+    pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter(pipeline)
 
+    # ✅ Hybrid chunker
     chunker = HybridChunker(chunk_size=500, overlap=50)
 
     logger.info("Initialization successful.")
