@@ -5,6 +5,7 @@ from pathlib import Path
 from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
 from typing import List
+import torch
 
 # --- Configuration ---
 MAX_CHUNK_TOKENS = 500
@@ -67,9 +68,19 @@ def process_pdfs_for_chunking():
         return
 
     try:
-        # Initialize docling components
+        # Detect GPU availability
+        if torch.cuda.is_available():
+            device = "cuda"
+            logger.info("🚀 Using GPU (CUDA) for Docling")
+        else:
+            device = "cpu"
+            logger.warning("⚠️ No GPU detected, using CPU")
+
+        # Initialize docling components with GPU/CPU setting
         logger.info("Initializing document converter and chunker...")
-        converter = DocumentConverter()
+        converter = DocumentConverter(
+            pipeline_options={"device": 0 if device == "cuda" else -1}
+        )
         chunker = HybridChunker(max_tokens=MAX_CHUNK_TOKENS)
         logger.info("Initialization successful.")
     except ImportError as e:
@@ -155,3 +166,4 @@ def process_pdfs_for_chunking():
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
+
