@@ -57,12 +57,15 @@ def main(model_id: str):
     # --- Connect to LanceDB ---
     db = lancedb.connect(DB_URI)
 
-    # Drop existing table (optional if re-running)
+    # Check if table exists already
     if TABLE_NAME in db.table_names():
-        logger.info(f"Table {TABLE_NAME} already exists. Dropping it for rebuild.")
-        db.drop_table(TABLE_NAME)
-
-    table = db.create_table(TABLE_NAME, data=[])
+        table = db.open_table(TABLE_NAME)
+        existing_count = table.count_rows()
+        logger.info(f"Resuming: Found existing table with {existing_count} records.")
+    else:
+        logger.info(f"Creating new table: {TABLE_NAME}")
+        table = db.create_table(TABLE_NAME, data=[])
+        existing_count = 0
 
     # Save metadata about the embedding model
     db.create_table(
@@ -72,10 +75,18 @@ def main(model_id: str):
     )
     logger.info(f"Saved embedding model metadata: {model_id}")
 
+    # --- Resume from where we left off ---
+    total_chunks = len(all_chunks)
+    if existing_count >= total_chunks:
+        logger.info("✅ All chunks already embedded. Nothing to do.")
+        return
+
+    logger.info(f"Starting from chunk {existing_count} / {total_chunks}")
+
     # --- Insert embeddings ---
     records = []
     batch_size = 32
-    for i in range(0, len(all_chunks), batch_size):
+    for i in range(existing_count, total_chunks, batch_size):
         batch = all_chunks[i:i+batch_size]
 
         texts = []
@@ -95,11 +106,11 @@ def main(model_id: str):
                 "metadata": metas[j]
             })
 
-        logger.info(f"Processed {i+len(batch)} / {len(all_chunks)} chunks")
+        table.add(records)
+        records = []  # reset buffer
 
-    # Write to table
-    logger.info(f"Inserting {len(records)} records into LanceDB...")
-    table.add(records)
+        logger.info(f"Processed {i+len(batch)} / {total_chunks} chunks")
+
     logger.info("✅ Ingestion complete!")
 
 if __name__ == "__main__":
