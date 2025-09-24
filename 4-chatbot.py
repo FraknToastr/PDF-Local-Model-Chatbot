@@ -1,99 +1,117 @@
-import streamlit as st
-import lancedb
+import os
+import logging
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import streamlit as st
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import lancedb
 
 # --- Config ---
-DB_DIR = "data/lancedb_data"
+DB_DIR = os.path.join("data", "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
-VECTOR_COL = "vector"
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  # local LLM
-EMBED_MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
 
-# --- Load embedding model ---
-@st.cache_resource
-def load_embed_model():
-    from transformers import AutoTokenizer, AutoModel
-    tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_ID)
-    model = AutoModel.from_pretrained(
-        EMBED_MODEL_ID,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Load LanceDB ---
+db = lancedb.connect(DB_DIR)
+if TABLE_NAME not in db.table_names():
+    raise RuntimeError(f"❌ Table {TABLE_NAME} not found in LanceDB. Run script 3 first.")
+
+table = db.open_table(TABLE_NAME)
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="PDF Local Model Chatbot", layout="wide")
+st.title("📄 PDF Local Model Chatbot")
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+
+    model_id = st.selectbox(
+        "Choose model",
+        [
+            "mistralai/Mistral-7B-Instruct-v0.2",
+            "meta-llama/Llama-2-7b-chat-hf",
+            "NousResearch/Llama-2-13b-chat-hf",
+        ],
+        index=0,
     )
-    if torch.cuda.is_available():
-        model = model.to("cuda")
-    return tokenizer, model
 
-def embed_texts(tokenizer, model, texts):
-    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-    if torch.cuda.is_available():
-        inputs = {k: v.to("cuda") for k, v in inputs.items()}
-    with torch.no_grad():
-        emb = model(**inputs).last_hidden_state.mean(dim=1).cpu().numpy()
-    return emb
+    top_k = st.slider("Top-K results", 1, 20, 5)
+    temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
+    max_new_tokens = st.slider("Max new tokens", 50, 2000, 512, 50)
 
-# --- Load LLM model ---
+    show_sources = st.checkbox("Show Sources", value=True)
+
+st.write("Ask a question based on the ingested PDFs:")
+
+user_query = st.text_input("Your question:")
+
+# --- Model Loading (lazy) ---
 @st.cache_resource
-def load_llm():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+def load_model(model_id: str):
+    logger.info(f"Loading model {model_id} ...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device_map="auto",
     )
     return tokenizer, model
 
-def generate_response(llm_tokenizer, llm_model, prompt, max_new_tokens=512):
-    inputs = llm_tokenizer(prompt, return_tensors="pt").to(llm_model.device)
-    with torch.no_grad():
-        outputs = llm_model.generate(**inputs, max_new_tokens=max_new_tokens)
-    return llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
+if user_query:
+    tokenizer, model = load_model(model_id)
 
-# --- Streamlit App ---
-def main():
-    st.set_page_config(page_title="PDF Chatbot", layout="wide")
-    st.title("📄 PDF Local Model Chatbot")
+    # --- Embed query ---
+    from sentence_transformers import SentenceTransformer
+    embedder = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
+    query_embedding = embedder.encode(user_query).tolist()
 
-    query = st.text_input("Ask a question about the PDFs:")
+    # --- Search LanceDB ---
+    results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
 
-    if query:
-        # Load embedding model
-        embed_tokenizer, embed_model = load_embed_model()
-        query_embedding = embed_texts(embed_tokenizer, embed_model, [query])[0]
+    if not results:
+        st.error("No relevant chunks found in database. Try re-running script 2 and 3.")
+    else:
+        # --- Build context ---
+        context_chunks = [r["text"] for r in results if "text" in r]
+        context = "\n\n".join(context_chunks)
 
-        # Connect to LanceDB
-        db = lancedb.connect(DB_DIR)
-        if TABLE_NAME not in db.table_names():
-            st.error(f"Table '{TABLE_NAME}' not found in {DB_DIR}. Run Script 3 first.")
-            return
-        table = db.open_table(TABLE_NAME)
+        # --- Grounded system prompt ---
+        prompt = f"""
+You are a PDF chatbot. Only answer using the provided context from PDFs.
+If the answer is not in the context, reply: 'I could not find relevant information in the PDFs.'
 
-        # Search LanceDB ✅ explicit vector column
-        top_k = 5
-        results = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(top_k).to_list()
+### Context:
+{context}
 
-        if not results:
-            st.warning("No relevant chunks found in the database.")
-            return
+### Question:
+{user_query}
 
-        # Build context
-        context = "\n\n".join([r["text"] for r in results])
-        prompt = f"Answer the question based only on the following context:\n\n{context}\n\nQuestion: {query}\nAnswer:"
+### Answer:
+"""
 
-        # Generate response
-        llm_tokenizer, llm_model = load_llm()
-        answer = generate_response(llm_tokenizer, llm_model, prompt)
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        # Display
-        st.subheader("💡 Answer")
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True,
+            )
+
+        answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # --- Display Answer ---
+        st.subheader("🤖 Answer")
         st.write(answer)
 
-        # Show sources
-        with st.expander("📂 Show Sources"):
+        if show_sources:
+            st.subheader("📚 Sources")
             for r in results:
+                meta = r.get("metadata", {})
                 st.markdown(
-                    f"- **{r.get('source_file')}** "
-                    f"(page {r.get('page_number')}, date: {r.get('date')})"
+                    f"- **{meta.get('source_file', 'Unknown')}**, "
+                    f"Page {meta.get('page_number', '?')} "
+                    f"(Date: {meta.get('date', 'N/A')})"
                 )
-
-if __name__ == "__main__":
-    main()
