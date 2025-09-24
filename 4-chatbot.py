@@ -107,11 +107,11 @@ if user_query:
     # Embed query
     query_embedding = embedder.encode(user_query).tolist()
 
-    # Search LanceDB
+    # Search LanceDB (but don’t dump results to screen)
     results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
     context = "\n\n".join([clean_text(r.get("text", "")) for r in results if r.get("text")]) or "No relevant context found."
 
-    # Build prompt
+    # Build prompt (internal use only)
     prompt = f"Answer factually based only on the following context:\n\n{context}\n\nQuestion: {user_query}\nAnswer:"
 
     # Generate response
@@ -124,7 +124,7 @@ if user_query:
     )
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # Save conversation
+    # Save only Q&A to history
     st.session_state["history"].append(("user", user_query))
     st.session_state["history"].append(("bot", response))
 
