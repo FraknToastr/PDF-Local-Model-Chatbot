@@ -4,6 +4,7 @@ import torch
 from transformers import AutoTokenizer, AutoModel, TextIteratorStreamer
 from typing import List
 import threading
+import gc
 
 # --- Config ---
 DB_URI = "data/lancedb_data"
@@ -82,17 +83,24 @@ if TABLE_NAME not in db.table_names():
 
 table = db.open_table(TABLE_NAME)
 
+# --- Helper to stop generation ---
+def stop_generation(thread: threading.Thread):
+    st.session_state.stop_requested = True
+    if thread.is_alive():
+        # Threads can't be force-killed directly, but freeing CUDA memory helps release GPU
+        del thread
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    st.warning("⏹ Generation stopped by user")
+
 # --- Chatbot UI ---
 st.title("📄 PDF Local Model Chatbot")
 
 user_query = st.text_input("Ask a question about the documents:")
 
 if user_query:
-    # Reset stop flag at new query
-    if "stop_requested" not in st.session_state:
-        st.session_state.stop_requested = False
-    else:
-        st.session_state.stop_requested = False
+    st.session_state.stop_requested = False
 
     # Progress bar
     progress = st.progress(0, text="🔎 Embedding query...")
@@ -120,8 +128,8 @@ if user_query:
         temperature=0.3,
     )
 
-    thread = threading.Thread(target=chat_model.generate, kwargs=generation_kwargs)
-    thread.start()
+    gen_thread = threading.Thread(target=chat_model.generate, kwargs=generation_kwargs)
+    gen_thread.start()
 
     progress.progress(75, text="🤖 Generating answer...")
 
@@ -131,16 +139,14 @@ if user_query:
     streamed_text = ""
 
     # Stop button
-    stop_button = st.button("⏹ Stop Generation")
+    if st.button("⏹ Stop Generation"):
+        stop_generation(gen_thread)
 
     for new_text in streamer:
         if st.session_state.stop_requested:
             break
         streamed_text += new_text
         answer_placeholder.markdown(streamed_text)
-
-        if stop_button:
-            st.session_state.stop_requested = True
 
     progress.progress(100, text="✅ Done!")
 
