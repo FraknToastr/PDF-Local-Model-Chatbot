@@ -16,22 +16,32 @@ DEFAULT_MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def embed_func(texts, tokenizer, model):
+def embed_func(texts, tokenizer, model, device):
     """Embed a list of texts into vectors."""
-    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(model.device)
+    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(device)
     with torch.no_grad():
         embeddings = model(**inputs).last_hidden_state[:, 0, :]
     return embeddings.cpu().to(torch.float32).numpy()
 
 def main(model_id: str):
+    # --- Detect GPU ---
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logger.info("🚀 Using GPU for embeddings")
+        dtype = torch.float16
+    else:
+        device = torch.device("cpu")
+        logger.info("⚠️ GPU not found, falling back to CPU")
+        dtype = torch.float32
+
     # --- Load embedding model ---
     logger.info(f"Loading embedding model: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModel.from_pretrained(
         model_id,
-        dtype=torch.bfloat16,
-        device_map="auto"
-    )
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None
+    ).to(device)
     logger.info("Model loaded successfully.")
 
     # --- Load chunks ---
@@ -76,7 +86,7 @@ def main(model_id: str):
                 texts.append(c["chunk"].text)  # old format
             metas.append(c.get("metadata", {}))
 
-        embeddings = embed_func(texts, tokenizer, model)
+        embeddings = embed_func(texts, tokenizer, model, device)
         for j, text in enumerate(texts):
             records.append({
                 "vector": embeddings[j],
