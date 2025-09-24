@@ -21,7 +21,10 @@ def load_model(model_id: str):
     logger.info(f"Loading embedding model: {model_id}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(model_id, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
+    model = AutoModel.from_pretrained(
+        model_id,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    )
 
     if torch.cuda.is_available():
         model = model.to("cuda")
@@ -53,7 +56,7 @@ def main():
         logger.error("❌ No chunks to embed. Exiting.")
         return
 
-    # Load model
+    # Load embedding model
     tokenizer, model = load_model(MODEL_ID)
 
     # Prepare texts & metadata
@@ -75,18 +78,18 @@ def main():
         ("date", pa.string()),
     ])
 
-    # Check if table already exists
+    # Check if table exists
     if TABLE_NAME in db.table_names():
         logger.info(f"📂 Table '{TABLE_NAME}' already exists → checking for duplicates")
         table = db.open_table(TABLE_NAME)
 
-        # Fetch existing keys (source_file + page_number + text)
+        # Fetch existing keys
         existing = set()
         for row in table.to_list():
             key = (row.get("source_file"), row.get("page_number"), row.get("text"))
             existing.add(key)
 
-        # Build new records, skip duplicates
+        # Build new unique records
         new_records = []
         for emb, txt, meta in zip(embeddings, texts, metadata):
             key = (meta.get("source_file"), meta.get("page_number"), txt)
