@@ -87,19 +87,45 @@ table = db.open_table(TABLE_NAME)
 def stop_generation(thread: threading.Thread):
     st.session_state.stop_requested = True
     if thread.is_alive():
-        # Threads can't be force-killed directly, but freeing CUDA memory helps release GPU
         del thread
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     st.warning("⏹ Generation stopped by user")
 
+# --- Helper to clear chat ---
+def clear_chat():
+    st.session_state.user_query = ""
+    st.session_state.stop_requested = False
+    st.session_state.answer_text = ""
+    st.session_state.sources = []
+    st.session_state.progress = 0
+    st.experimental_rerun()
+
 # --- Chatbot UI ---
 st.title("📄 PDF Local Model Chatbot")
 
-user_query = st.text_input("Ask a question about the documents:")
+# Clear Chat button at top
+if st.button("🧹 Clear Chat"):
+    clear_chat()
+
+# Store session state
+if "user_query" not in st.session_state:
+    st.session_state.user_query = ""
+if "answer_text" not in st.session_state:
+    st.session_state.answer_text = ""
+if "sources" not in st.session_state:
+    st.session_state.sources = []
+if "progress" not in st.session_state:
+    st.session_state.progress = 0
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+
+# Input
+user_query = st.text_input("Ask a question about the documents:", value=st.session_state.user_query)
 
 if user_query:
+    st.session_state.user_query = user_query
     st.session_state.stop_requested = False
 
     # Progress bar
@@ -111,6 +137,7 @@ if user_query:
 
     # Step 2: Retrieve relevant chunks
     results = table.search(query_embedding).limit(top_k).to_list()
+    st.session_state.sources = results
     progress.progress(50, text="📝 Preparing context...")
 
     # Build context string
@@ -138,7 +165,6 @@ if user_query:
     answer_placeholder = st.empty()
     streamed_text = ""
 
-    # Stop button
     if st.button("⏹ Stop Generation"):
         stop_generation(gen_thread)
 
@@ -146,11 +172,12 @@ if user_query:
         if st.session_state.stop_requested:
             break
         streamed_text += new_text
+        st.session_state.answer_text = streamed_text
         answer_placeholder.markdown(streamed_text)
 
     progress.progress(100, text="✅ Done!")
 
     # Show sources
     with st.expander("📚 Sources"):
-        for r in results:
+        for r in st.session_state.sources:
             st.markdown(f"- {r['metadata'].get('source_file', 'Unknown source')}")
