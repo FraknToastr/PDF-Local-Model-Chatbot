@@ -47,13 +47,13 @@ with st.sidebar:
     )
 
     top_k = st.slider("Top-K results", 1, 20, 5)
-    temperature = st.slider("Temperature", 0.0, 1.5, 0.7, 0.1)
+    temperature = st.slider("Temperature", 0.0, 1.5, 0.3, 0.1)  # ✅ allow 0
     max_new_tokens = st.slider("Max new tokens", 50, 2000, 512, 50)
 
     show_sources = st.checkbox("Show Sources", value=True)
     debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)
     suppress_context = st.checkbox("🚫 Suppress Context (ignore LanceDB chunks)", value=False)
-    grounded_only = st.checkbox("🛡️ Grounded Answers Only", value=False)  # ✅ NEW
+    grounded_only = st.checkbox("🛡️ Grounded Answers Only", value=False)
 
 st.write("Ask a question based on the ingested PDFs:")
 
@@ -115,13 +115,16 @@ If the answer is not in the context, you may still answer but clearly state that
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
+    # ✅ Fix: greedy decoding when temperature == 0
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": (temperature > 0),
+    }
+    if temperature > 0:
+        gen_kwargs["temperature"] = temperature
+
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=True,
-        )
+        outputs = model.generate(**inputs, **gen_kwargs)
 
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
