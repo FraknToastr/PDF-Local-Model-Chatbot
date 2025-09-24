@@ -109,6 +109,14 @@ def process_pdfs_for_chunking():
         pickle.dump(all_chunks, f)
 
     logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
+    logger.info(f"✅ Wrote {len(all_chunks)} chunks → {OUTPUT_FILE}")
+
+    # Extra check: confirm file exists
+    if os.path.exists(OUTPUT_FILE):
+        size_kb = os.path.getsize(OUTPUT_FILE) / 1024
+        logger.info(f"📦 File created at {OUTPUT_FILE} ({size_kb:.1f} KB)")
+    else:
+        logger.error(f"❌ Expected output file missing: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
