@@ -63,20 +63,10 @@ def main():
     # Generate embeddings
     embeddings = embed_texts(tokenizer, model, texts)
 
-    # Build LanceDB dataset
+    # Connect to LanceDB
     db = lancedb.connect(DB_DIR)
 
-    records = []
-    for emb, txt, meta in zip(embeddings, texts, metadata):
-        rec = {
-            VECTOR_COL: emb.tolist(),
-            "text": txt,
-            "source_file": meta.get("source_file"),
-            "page_number": meta.get("page_number"),
-            "date": meta.get("date"),
-        }
-        records.append(rec)
-
+    # Define schema
     schema = pa.schema([
         (VECTOR_COL, pa.list_(pa.float32())),
         ("text", pa.string()),
@@ -85,12 +75,44 @@ def main():
         ("date", pa.string()),
     ])
 
-    logger.info(f"Creating new table with schema: {TABLE_NAME}")
-    table = db.create_table(TABLE_NAME, schema=schema, data=records, mode="overwrite")
+    # Check if table already exists
+    if TABLE_NAME in db.table_names():
+        logger.info(f"📂 Table '{TABLE_NAME}' already exists → appending new records")
+        table = db.open_table(TABLE_NAME)
+
+        new_records = []
+        for emb, txt, meta in zip(embeddings, texts, metadata):
+            rec = {
+                VECTOR_COL: emb.tolist(),
+                "text": txt,
+                "source_file": meta.get("source_file"),
+                "page_number": meta.get("page_number"),
+                "date": meta.get("date"),
+            }
+            new_records.append(rec)
+
+        table.add(new_records)
+        logger.info(f"✅ Appended {len(new_records)} new records to '{TABLE_NAME}'")
+
+    else:
+        logger.info(f"📂 Table '{TABLE_NAME}' does not exist → creating new table")
+        records = []
+        for emb, txt, meta in zip(embeddings, texts, metadata):
+            rec = {
+                VECTOR_COL: emb.tolist(),
+                "text": txt,
+                "source_file": meta.get("source_file"),
+                "page_number": meta.get("page_number"),
+                "date": meta.get("date"),
+            }
+            records.append(rec)
+
+        table = db.create_table(TABLE_NAME, schema=schema, data=records, mode="create")
+        logger.info(f"✅ Created new table '{TABLE_NAME}' with {len(records)} records")
 
     # Sanity check: confirm DB exists
     if os.path.exists(DB_DIR):
-        logger.info(f"✅ LanceDB created at {DB_DIR}")
+        logger.info(f"📦 LanceDB directory: {DB_DIR}")
     else:
         logger.error(f"❌ Expected LanceDB directory missing: {DB_DIR}")
 
@@ -99,7 +121,8 @@ def main():
     for field in table.schema:
         logger.info(f"  - {field.name}: {field.type}")
 
-    logger.info("🎉 Embeddings stored successfully in LanceDB")
+    # Print table stats
+    logger.info(f"🔢 Total records in '{TABLE_NAME}': {table.count_rows()}")
 
 if __name__ == "__main__":
     main()
