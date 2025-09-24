@@ -26,29 +26,33 @@ def embed_func(texts, tokenizer, model, device):
     return embeddings.cpu().to(torch.float32).numpy()
 
 def infer_schema_from_sample(sample):
-    """Infer LanceDB schema from a sample record."""
+    """Infer LanceDB schema from a sample record, flattening metadata fields."""
     fields = [
         pa.field("vector", pa.list_(pa.float32())),
         pa.field("text", pa.string()),
     ]
 
     if "metadata" in sample and isinstance(sample["metadata"], dict):
-        metadata_fields = []
         for k, v in sample["metadata"].items():
             # Infer type from value
             if isinstance(v, str):
-                metadata_fields.append(pa.field(k, pa.string()))
+                fields.append(pa.field(k, pa.string()))
             elif isinstance(v, int):
-                metadata_fields.append(pa.field(k, pa.int64()))
+                fields.append(pa.field(k, pa.int64()))
             elif isinstance(v, float):
-                metadata_fields.append(pa.field(k, pa.float64()))
+                fields.append(pa.field(k, pa.float64()))
             else:
-                metadata_fields.append(pa.field(k, pa.string()))  # fallback
-        fields.append(pa.field("metadata", pa.struct(metadata_fields)))
-    else:
-        fields.append(pa.field("metadata", pa.struct([])))
+                fields.append(pa.field(k, pa.string()))  # fallback
 
     return pa.schema(fields)
+
+def flatten_record(vector, text, metadata):
+    """Flatten metadata into top-level fields for LanceDB."""
+    record = {"vector": vector, "text": text}
+    if isinstance(metadata, dict):
+        for k, v in metadata.items():
+            record[k] = v
+    return record
 
 def main(model_id: str):
     # --- Detect GPU ---
@@ -100,10 +104,10 @@ def main(model_id: str):
         sample_record = {
             "vector": [0.0],
             "text": text_val,
-            "metadata": first_chunk.get("metadata", {})
+            **first_chunk.get("metadata", {})
         }
         schema = infer_schema_from_sample(sample_record)
-        logger.info(f"Creating new table with inferred schema: {TABLE_NAME}")
+        logger.info(f"Creating new table with inferred + flattened schema: {TABLE_NAME}")
         table = db.create_table(TABLE_NAME, schema=schema)
         existing_count = 0
 
@@ -142,11 +146,7 @@ def main(model_id: str):
 
         records = []
         for j, text in enumerate(texts):
-            records.append({
-                "vector": embeddings[j],
-                "text": text,
-                "metadata": metas[j]
-            })
+            records.append(flatten_record(embeddings[j], text, metas[j]))
 
         # Save progress immediately (batch-safe)
         table.add(records)
