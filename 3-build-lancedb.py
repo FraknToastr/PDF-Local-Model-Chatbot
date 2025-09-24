@@ -77,11 +77,21 @@ def main():
 
     # Check if table already exists
     if TABLE_NAME in db.table_names():
-        logger.info(f"📂 Table '{TABLE_NAME}' already exists → appending new records")
+        logger.info(f"📂 Table '{TABLE_NAME}' already exists → checking for duplicates")
         table = db.open_table(TABLE_NAME)
 
+        # Fetch existing keys (source_file + page_number + text)
+        existing = set()
+        for row in table.to_list():
+            key = (row.get("source_file"), row.get("page_number"), row.get("text"))
+            existing.add(key)
+
+        # Build new records, skip duplicates
         new_records = []
         for emb, txt, meta in zip(embeddings, texts, metadata):
+            key = (meta.get("source_file"), meta.get("page_number"), txt)
+            if key in existing:
+                continue
             rec = {
                 VECTOR_COL: emb.tolist(),
                 "text": txt,
@@ -91,8 +101,11 @@ def main():
             }
             new_records.append(rec)
 
-        table.add(new_records)
-        logger.info(f"✅ Appended {len(new_records)} new records to '{TABLE_NAME}'")
+        if new_records:
+            table.add(new_records)
+            logger.info(f"✅ Appended {len(new_records)} new unique records to '{TABLE_NAME}'")
+        else:
+            logger.info("ℹ️ No new unique records to add")
 
     else:
         logger.info(f"📂 Table '{TABLE_NAME}' does not exist → creating new table")
