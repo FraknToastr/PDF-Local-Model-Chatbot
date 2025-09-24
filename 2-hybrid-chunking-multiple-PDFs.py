@@ -49,7 +49,7 @@ def extract_date_from_path(path: str):
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
 
-    # ✅ Proper pipeline initialization with PdfPipelineOptions
+    # ✅ Proper pipeline initialization
     pipeline_options = PdfPipelineOptions()
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter({InputFormat.PDF: pipeline})
@@ -89,7 +89,9 @@ def process_pdfs_for_chunking():
         logger.info(f"Processing new PDF: {rel_path}")
 
         try:
-            doc = converter.convert(pdf_path)
+            # ✅ FIX: unwrap ConversionResult into a DoclingDocument
+            result = converter.convert(pdf_path)
+            doc = result.document
             chunks = chunker.chunk(doc)
 
             for ch in chunks:
