@@ -148,11 +148,18 @@ if user_query:
     st.session_state.sources = results
     progress.progress(50, text="📝 Preparing context...")
 
-    # Build context string
-    context = "\n\n".join([r["text"] for r in results])
+    # Build context string with citations
+    context_parts = []
+    for idx, r in enumerate(results, 1):
+        context_parts.append(f"[S{idx}] {r['text']}")
+    context = "\n\n".join(context_parts)
 
     # Step 3: Prepare generation
-    prompt = f"Answer the question based only on the context below:\n\n{context}\n\nQuestion: {user_query}\nAnswer:"
+    prompt = (
+        f"Answer the question based only on the context below. "
+        f"When you use information from a source, cite it with [S#].\n\n"
+        f"{context}\n\nQuestion: {user_query}\nAnswer:"
+    )
 
     streamer = TextIteratorStreamer(chat_tokenizer, skip_prompt=True, skip_special_tokens=True)
     generation_kwargs = dict(
@@ -199,10 +206,8 @@ if st.session_state.chat_history:
             st.markdown(f"**A{i}:** {turn['answer']}")
             if turn["sources"]:
                 st.markdown("**Sources:**")
-                for r in turn["sources"]:
-                    meta_lines = []
-                    if "source_file" in r:
-                        meta_lines.append(f"📄 {r['source_file']}")
+                for idx, r in enumerate(turn["sources"], 1):
+                    meta_lines = [f"🔖 S{idx} → {r.get('source_file','Unknown file')}"]
                     for k, v in r.items():
                         if k not in ["vector", "text", "source_file"] and v is not None:
                             meta_lines.append(f"- **{k}**: {v}")
