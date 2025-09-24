@@ -52,7 +52,8 @@ with st.sidebar:
 
     show_sources = st.checkbox("Show Sources", value=True)
     debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)
-    suppress_context = st.checkbox("🚫 Suppress Context (ignore LanceDB chunks)", value=False)  # ✅ NEW
+    suppress_context = st.checkbox("🚫 Suppress Context (ignore LanceDB chunks)", value=False)
+    grounded_only = st.checkbox("🛡️ Grounded Answers Only", value=False)  # ✅ NEW
 
 st.write("Ask a question based on the ingested PDFs:")
 
@@ -73,11 +74,9 @@ if user_query:
     tokenizer, model = load_model(model_id)
 
     if suppress_context:
-        # 🚫 Skip LanceDB search entirely
         context = ""
         results = []
     else:
-        # Normal retrieval
         embedder = SentenceTransformer(embedding_model_id)
         query_embedding = embedder.encode(user_query).tolist()
         results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
@@ -86,10 +85,24 @@ if user_query:
     # --- Prompt ---
     if suppress_context:
         prompt = f"### Question:\n{user_query}\n\n### Answer:\n"
+    elif grounded_only:
+        prompt = f"""
+You are a strict PDF chatbot. 
+Only answer if the provided context contains relevant information from the PDFs. 
+If the answer is not in the context, reply exactly: "I could not find relevant information in the PDFs."
+
+### Context:
+{context}
+
+### Question:
+{user_query}
+
+### Answer:
+"""
     else:
         prompt = f"""
-You are a PDF chatbot. Only answer using the provided context from PDFs.
-If the answer is not in the context, reply: 'I could not find relevant information in the PDFs.'
+You are a helpful PDF chatbot. Use the provided context from PDFs to answer the question. 
+If the answer is not in the context, you may still answer but clearly state that the PDFs did not mention it.
 
 ### Context:
 {context}
