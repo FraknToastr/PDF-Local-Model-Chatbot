@@ -1,183 +1,113 @@
-import os
-import re
+# 4-chatbot.py
 import streamlit as st
 import lancedb
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sentence_transformers import SentenceTransformer
+import re
 
-# --------------------------
-# Page Config
-# --------------------------
-st.set_page_config(
-    page_title="Council Meeting Chatbot",
-    page_icon="https://www.cityofadelaide.com.au/common/base/img/favicon.ico",  # ✅ official favicon
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+DB_PATH = "data/lancedb_data"
+TABLE_NAME = "adelaide_agendas"
+VECTOR_COL = "vector"
 
-# Dark theme styling + chat bubbles
-st.markdown("""
+st.set_page_config(page_title="Council Meeting Chatbot", page_icon="https://www.cityofadelaide.com.au/favicon.ico")
+
+st.markdown(
+    """
     <style>
-        body { background-color: #111; color: #eee; }
+        body { background-color: #121212; color: #fff; }
         .user-bubble {
-            background-color: #2c2f38;
+            background-color: #2c2c34;
             color: #fff;
-            padding: 8px 12px;
-            border-radius: 12px;
-            margin: 4px 0;
-            text-align: right;
+            padding: 10px 15px;
+            border-radius: 15px;
+            margin: 5px;
+            max-width: 70%;
             float: right;
             clear: both;
         }
         .bot-bubble {
-            background-color: #0057b7;
+            background-color: #0d47a1;
             color: #fff;
-            padding: 12px;
-            border-radius: 12px;
-            margin: 4px 0;
+            padding: 10px 15px;
+            border-radius: 15px;
+            margin: 5px;
+            max-width: 70%;
             float: left;
             clear: both;
-            max-width: 85%;
         }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# --------------------------
-# Logo
-# --------------------------
-st.image("https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg", width=200)
+st.image("https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg", width=180)
 st.title("Council Meeting Chatbot")
 
-# --------------------------
-# Load DB + Embedding Models
-# --------------------------
-DB_DIR = "data/lancedb_data"
-TABLE_NAME = "adelaide_agendas"
-VECTOR_COL = "vector"
-
-db = lancedb.connect(DB_DIR)
+db = lancedb.connect(DB_PATH)
 table = db.open_table(TABLE_NAME)
 
-embedding_models = {
-    "sentence-transformers/all-MiniLM-L6-v2": SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2"),
-    "mixedbread-ai/mxbai-embed-large-v1": SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
-}
-default_embed_model = "sentence-transformers/all-MiniLM-L6-v2"
+embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+gen_model_id = "mistralai/Mistral-7B-Instruct-v0.2"
+tokenizer = AutoTokenizer.from_pretrained(gen_model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    gen_model_id,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
 
-# --------------------------
-# Load LLM (local Hugging Face)
-# --------------------------
-@st.cache_resource
-def load_model():
-    model_id = "mistralai/Mistral-7B-Instruct-v0.2"
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto"
-    )
-    return tokenizer, model
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-tokenizer, model = load_model()
-
-# --------------------------
-# Deduplication helper
-# --------------------------
-def deduplicate_chunks(chunks):
-    seen = set()
-    unique = []
-    for ch in chunks:
-        text = ch.get("text", "").strip()
-        if not text:
-            continue
-        key = re.sub(r"\s+", " ", text)
-        if key not in seen:
-            seen.add(key)
-            unique.append(ch)
-    return unique
-
-# --------------------------
-# Boost name/title matches
-# --------------------------
-def boost_name_chunks(results):
-    boosted = []
-    for r in results:
-        txt = r.get("text", "").lower()
-        if any(keyword in txt for keyword in ["lord mayor", "councillor", "dr", "ms", "mr"]):
-            r["_score"] = r.get("_score", 1.0) * 1.5
-        boosted.append(r)
-    return sorted(boosted, key=lambda x: -x.get("_score", 1.0))
-
-# --------------------------
-# Chat State
-# --------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# --------------------------
-# Sidebar Settings
-# --------------------------
-st.sidebar.header("⚙️ Settings")
-embed_model_choice = st.sidebar.selectbox("Embedding model", list(embedding_models.keys()), index=0)
-top_k = st.sidebar.slider("Top-K Chunks", 1, 10, 5)
-temperature = st.sidebar.slider("Temperature", 0.1, 1.5, 0.7)
-max_new_tokens = st.sidebar.slider("Max New Tokens", 50, 1000, 300)
-use_context = st.sidebar.checkbox("Restrict to PDF context only", value=True)
-
-if st.sidebar.button("Reset Conversation"):
-    st.session_state.messages = []
-
-# --------------------------
-# Input Box
-# --------------------------
-user_input = st.chat_input("Ask a question about the council meeting PDFs...")
-
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
-# --------------------------
-# Conversation Loop
-# --------------------------
-for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.markdown(f"<div class='user-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div class='bot-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
-
-if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
-    query = st.session_state.messages[-1]["content"]
-
-    # Embed query
-    embedder = embedding_models[embed_model_choice]
-    query_embedding = embedder.encode(query).tolist()
-
-    # Search LanceDB
+def boosted_search(query, top_k=5):
+    query_embedding = embed_model.encode([query])[0]
     results = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(top_k).to_list()
-    results = deduplicate_chunks(results)
-    results = boost_name_chunks(results)
 
+    # Boost with keyword match
+    if any(kw in query.lower() for kw in ["who", "name", "lord mayor"]):
+        keyword_hits = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(50).to_list()
+        keyword_hits = [r for r in keyword_hits if re.search(r"Lord Mayor", r.get("text", ""), re.I)]
+        results.extend(keyword_hits)
+
+    # Deduplicate boilerplate
+    seen = set()
+    filtered = []
+    for r in results:
+        txt = r.get("text", "")
+        if not txt.strip():
+            continue
+        if any(pat.lower() in txt.lower() for pat in [
+            "we pray for wisdom, courage, empathy, understanding and guidance"
+        ]):
+            continue
+        if txt not in seen:
+            seen.add(txt)
+            filtered.append(r)
+
+    return filtered[:top_k]
+
+with st.form("chat_form", clear_on_submit=True):
+    user_input = st.text_input("Ask a question:")
+    submitted = st.form_submit_button("Send")
+
+if submitted and user_input:
+    results = boosted_search(user_input, top_k=5)
     context = "\n\n".join([r.get("text", "") for r in results]) if results else "No context found."
 
-    # Build prompt
-    if use_context and context != "No context found.":
-        prompt = f"Answer the question strictly using the provided context.\n\nContext:\n{context}\n\nQuestion: {query}\nAnswer:"
-    else:
-        prompt = f"Question: {query}\nAnswer:"
+    prompt = f"Answer the following question strictly using the provided context.\n\nContext:\n{context}\n\nQuestion: {user_input}\nAnswer:"
 
-    # Generate response
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=(temperature > 0.0),
-        temperature=temperature if temperature > 0.0 else 1.0,
-    )
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    outputs = model.generate(**inputs, max_new_tokens=200, temperature=0.7, do_sample=True)
+    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # Trim echo
-    if "Answer:" in response:
-        response = response.split("Answer:", 1)[-1].strip()
+    st.session_state.chat_history.append(("user", user_input))
+    st.session_state.chat_history.append(("bot", answer))
 
-    st.session_state.messages.append({"role": "bot", "content": response})
-    st.markdown(f"<div class='bot-bubble'>{response}</div>", unsafe_allow_html=True)
+if st.button("Reset Chat"):
+    st.session_state.chat_history = []
+
+for role, msg in st.session_state.chat_history:
+    if role == "user":
+        st.markdown(f"<div class='user-bubble'>{msg}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='bot-bubble'>{msg}</div>", unsafe_allow_html=True)
