@@ -1,165 +1,109 @@
-import pickle
 import os
+import pickle
 import logging
-from pathlib import Path
+import re
+from datetime import datetime
 from docling.document_converter import DocumentConverter
-from docling.chunking import HybridChunker
-from typing import List
+from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+from docling.chunking import hybrid_chunk
 import torch
 
-# --- Configuration ---
-MAX_CHUNK_TOKENS = 500
-CHUNK_OVERLAP = 50  # tokens to overlap between chunks
-DATA_FOLDER = "data"
-OUTPUT_FILE = "data/all_chunks.pkl"
-PROCESSED_LOG_FILE = "data/processed_files.log"
+# --- Config ---
+DATA_DIR = "data"
+OUTPUT_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# --- Detect device ---
+if torch.cuda.is_available():
+    device = "cuda"
+    logger.info("🚀 Using GPU (CUDA) for Docling")
+else:
+    device = "cpu"
+    logger.warning("⚠️ No GPU detected, using CPU")
 
-# --- Helper Functions ---
-def load_processed_log() -> set:
-    """Loads the set of file paths that have already been processed."""
-    if os.path.exists(PROCESSED_LOG_FILE):
-        with open(PROCESSED_LOG_FILE, "r") as f:
-            return set(line.strip() for line in f)
-    return set()
+def extract_date_from_path(path: str):
+    """
+    Try to parse a date from a filename like:
+    data/2025/04_April/Agenda_Frontsheet_1259.pdf
+    → returns '2025-04-29' (last Tuesday of month as example) or '2025-04-01' fallback
+    """
+    parts = path.replace("\\", "/").split("/")
+    date_val = None
 
+    # Try extracting YYYY/MM_...
+    if len(parts) >= 3:
+        year = parts[-3]
+        month_part = parts[-2]
+        month_match = re.match(r"(\d{2})_", month_part)
+        if year.isdigit() and month_match:
+            yyyy = int(year)
+            mm = int(month_match.group(1))
+            # fallback: first of month
+            try:
+                date_val = datetime(yyyy, mm, 1).strftime("%Y-%m-%d")
+            except Exception:
+                date_val = None
 
-def save_processed_log(filepath: str):
-    """Saves the path of a successfully processed file."""
-    with open(PROCESSED_LOG_FILE, "a") as f:
-        f.write(filepath + "\n")
-
-
-def find_pdf_files(data_dir: str) -> List[Path]:
-    """Recursively finds all PDF files in a given directory."""
-    logger.info(f"Scanning for PDF files in '{data_dir}'...")
-    pdf_files = list(Path(data_dir).rglob("*.pdf"))
-    logger.info(f"Found {len(pdf_files)} PDF file(s).")
-    return pdf_files
-
-
-def sliding_window_chunks(text: str, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    """Create overlapping text windows from a chunk's text."""
-    words = text.split()
-    new_chunks = []
-    start = 0
-    while start < len(words):
-        end = min(start + MAX_CHUNK_TOKENS, len(words))
-        window = " ".join(words[start:end])
-        new_chunks.append(window)
-        if end == len(words):
-            break
-        start = end - overlap  # move back by overlap
-    return new_chunks
-
+    return date_val
 
 def process_pdfs_for_chunking():
-    """Main function to process all PDFs in the data folder for hybrid chunking with overlap."""
-    if not os.path.exists(DATA_FOLDER):
-        logger.error(
-            f"Data folder '{DATA_FOLDER}' not found. Please run the web scraper first."
-        )
-        return
+    logger.info("Initializing document converter and chunker...")
+    converter = DocumentConverter(StandardPdfPipeline())
+    logger.info("Initialization successful.")
 
-    # Detect GPU availability
-    if torch.cuda.is_available():
-        torch.set_default_device("cuda")
-        logger.info("🚀 Using GPU (CUDA) for Docling")
-    else:
-        logger.warning("⚠️ No GPU detected, using CPU")
-
-    try:
-        # Initialize docling components
-        logger.info("Initializing document converter and chunker...")
-        converter = DocumentConverter()  # No pipeline_options for your version
-        chunker = HybridChunker(max_tokens=MAX_CHUNK_TOKENS)
-        logger.info("Initialization successful.")
-    except ImportError as e:
-        logger.error(f"Failed to initialize docling components: {e}")
-        return
-
-    processed_files = load_processed_log()
-    all_chunks = []
-
-    # Check for existing chunks file and load them
+    # Load existing chunks if any
     if os.path.exists(OUTPUT_FILE):
-        try:
-            with open(OUTPUT_FILE, "rb") as f:
-                all_chunks = pickle.load(f)
-            logger.info(f"Loaded {len(all_chunks)} existing chunks from {OUTPUT_FILE}.")
-        except Exception as e:
-            logger.warning(
-                f"Could not load existing chunks: {e}. Starting with an empty list."
-            )
-            all_chunks = []
+        with open(OUTPUT_FILE, "rb") as f:
+            all_chunks = pickle.load(f)
+        logger.info(f"Loaded {len(all_chunks)} existing chunks from {OUTPUT_FILE}.")
+    else:
+        all_chunks = []
 
-    pdf_files = find_pdf_files(DATA_FOLDER)
-    newly_processed_count = 0
+    # Track processed files
+    processed_files = {c.get("metadata", {}).get("source_file") for c in all_chunks if "metadata" in c}
+
+    # Scan for PDFs
+    logger.info(f"Scanning for PDF files in '{DATA_DIR}'...")
+    pdf_files = []
+    for root, _, files in os.walk(DATA_DIR):
+        for f in files:
+            if f.lower().endswith(".pdf"):
+                pdf_files.append(os.path.join(root, f))
+
+    logger.info(f"Found {len(pdf_files)} PDF file(s).")
 
     for pdf_path in pdf_files:
-        str_path = str(pdf_path)
-        if str_path in processed_files:
-            logger.info(f"Skipping already processed file: {str_path}")
+        rel_path = os.path.relpath(pdf_path, DATA_DIR)
+
+        if rel_path in processed_files:
+            logger.info(f"Skipping already processed file: {rel_path}")
             continue
 
-        logger.info(f"Processing new PDF: {str_path}")
+        logger.info(f"Processing new PDF: {rel_path}")
 
         try:
-            # Convert PDF to a docling document object
-            conversion_result = converter.convert(str_path)
+            doc = converter.convert(pdf_path)
+            chunks = hybrid_chunk(doc, chunk_size=500, overlap=50)
 
-            # Handle different return types from different docling versions.
-            if hasattr(conversion_result, "document"):
-                document = conversion_result.document
-            else:
-                document = conversion_result
-
-            if not document:
-                logger.warning(
-                    f"Error: Could not convert document '{str_path}'. Skipping."
-                )
-                continue
-
-            # Chunk the document using the HybridChunker
-            base_chunks = list(chunker.chunk(document))
-
-            # Apply sliding window overlap to each chunk
-            for chunk in base_chunks:
-                overlapped_texts = sliding_window_chunks(chunk.text, CHUNK_OVERLAP)
-                for win_text in overlapped_texts:
-                    chunk_data = {
-                        "chunk": {"text": win_text},  # store plain dict for portability
-                        "metadata": {"source_file": str_path},
-                    }
-                    all_chunks.append(chunk_data)
-
-            logger.info(
-                f"Created {len(base_chunks)} base chunks and expanded to {len(all_chunks)} total with overlap."
-            )
-
-            # Log the processed file to avoid re-processing
-            save_processed_log(str_path)
-            newly_processed_count += 1
+            for ch in chunks:
+                metadata = {
+                    "source_file": rel_path,
+                    "page_number": getattr(ch, "page_number", None),
+                    "date": extract_date_from_path(rel_path)
+                }
+                all_chunks.append({"chunk": {"text": ch.text}, "metadata": metadata})
 
         except Exception as e:
-            logger.error(f"Failed to process '{str_path}': {e}")
+            logger.error(f"Failed to process '{rel_path}': {e}")
+            continue
 
-    if newly_processed_count > 0:
-        # Save all chunks to a single file
-        logger.info(f"Saving a total of {len(all_chunks)} chunks to {OUTPUT_FILE}...")
-        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-        with open(OUTPUT_FILE, "wb") as f:
-            pickle.dump(all_chunks, f)
-        logger.info("Chunks saved successfully!")
-    else:
-        logger.info("No new PDF files to process. Chunk file remains unchanged.")
+    # Save updated chunks
+    with open(OUTPUT_FILE, "wb") as f:
+        pickle.dump(all_chunks, f)
 
+    logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
