@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from docling.document_converter import DocumentConverter
 from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
-from docling.chunking import hybrid_chunk
+from docling.chunking import HybridChunker
 import torch
 
 # --- Config ---
@@ -27,12 +27,11 @@ def extract_date_from_path(path: str):
     """
     Try to parse a date from a filename like:
     data/2025/04_April/Agenda_Frontsheet_1259.pdf
-    → returns '2025-04-29' (last Tuesday of month as example) or '2025-04-01' fallback
+    → returns '2025-04-01' as a fallback
     """
     parts = path.replace("\\", "/").split("/")
     date_val = None
 
-    # Try extracting YYYY/MM_...
     if len(parts) >= 3:
         year = parts[-3]
         month_part = parts[-2]
@@ -40,7 +39,6 @@ def extract_date_from_path(path: str):
         if year.isdigit() and month_match:
             yyyy = int(year)
             mm = int(month_match.group(1))
-            # fallback: first of month
             try:
                 date_val = datetime(yyyy, mm, 1).strftime("%Y-%m-%d")
             except Exception:
@@ -51,6 +49,7 @@ def extract_date_from_path(path: str):
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
     converter = DocumentConverter(StandardPdfPipeline())
+    chunker = HybridChunker(chunk_size=500, overlap=50)
     logger.info("Initialization successful.")
 
     # Load existing chunks if any
@@ -61,7 +60,6 @@ def process_pdfs_for_chunking():
     else:
         all_chunks = []
 
-    # Track processed files
     processed_files = {c.get("metadata", {}).get("source_file") for c in all_chunks if "metadata" in c}
 
     # Scan for PDFs
@@ -85,7 +83,7 @@ def process_pdfs_for_chunking():
 
         try:
             doc = converter.convert(pdf_path)
-            chunks = hybrid_chunk(doc, chunk_size=500, overlap=50)
+            chunks = chunker.chunk(doc)
 
             for ch in chunks:
                 metadata = {
