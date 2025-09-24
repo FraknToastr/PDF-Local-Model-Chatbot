@@ -23,6 +23,10 @@ table = db.open_table(TABLE_NAME)
 st.set_page_config(page_title="PDF Local Model Chatbot", layout="wide")
 st.title("📄 PDF Local Model Chatbot")
 
+# --- Session State (conversation history) ---
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 with st.sidebar:
     st.header("⚙️ Settings")
 
@@ -54,6 +58,11 @@ with st.sidebar:
     debug_mode = st.checkbox("Debug Mode: Show raw chunks", value=False)
     suppress_context = st.checkbox("🚫 Suppress Context (ignore LanceDB chunks)", value=False)
     grounded_only = st.checkbox("🛡️ Grounded Answers Only", value=False)
+
+    # ✅ Reset button
+    if st.button("🔄 Reset Conversation"):
+        st.session_state.history = []
+        st.success("Conversation history cleared.")
 
 st.write("Ask a question based on the ingested PDFs:")
 
@@ -115,7 +124,7 @@ If the answer is not in the context, you may still answer but clearly state that
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-    # ✅ Fix: greedy decoding when temperature == 0
+    # ✅ Greedy decoding if temp=0
     gen_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": (temperature > 0),
@@ -127,6 +136,9 @@ If the answer is not in the context, you may still answer but clearly state that
         outputs = model.generate(**inputs, **gen_kwargs)
 
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    # --- Save to history ---
+    st.session_state.history.append({"question": user_query, "answer": answer})
 
     # --- Display ---
     st.subheader("🤖 Answer")
@@ -147,3 +159,10 @@ If the answer is not in the context, you may still answer but clearly state that
         for i, r in enumerate(results, start=1):
             st.markdown(f"**Chunk {i}:**")
             st.code(r.get("text", "")[:1000])
+
+# --- Show conversation history ---
+if st.session_state.history:
+    st.subheader("📝 Conversation History")
+    for i, entry in enumerate(st.session_state.history, 1):
+        st.markdown(f"**Q{i}:** {entry['question']}")
+        st.markdown(f"**A{i}:** {entry['answer']}")
