@@ -8,3 +8,4 @@ streamlit==1.39.0
 lancedb==0.24.1
 docling==2.53.0
 pickle-mixin==1.0.2
+sentence-transformers==2.7.0
