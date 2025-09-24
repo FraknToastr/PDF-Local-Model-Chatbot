@@ -91,7 +91,8 @@ def process_pdfs_for_chunking():
         try:
             # ✅ FIX: unwrap ConversionResult into a DoclingDocument
             result = converter.convert(pdf_path)
-            doc = result.document
+            doc = result.output   # <--- FIX HERE
+
             chunks = chunker.chunk(doc)
 
             for ch in chunks:
