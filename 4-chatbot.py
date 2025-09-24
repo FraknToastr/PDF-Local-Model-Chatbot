@@ -3,126 +3,134 @@ import logging
 import streamlit as st
 import lancedb
 import torch
-import subprocess
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
-
-# --- Config ---
-DB_DIR = "data/lancedb_data"
-TABLE_NAME = "adelaide_agendas"
-DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-LLM_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Streamlit setup ---
-st.set_page_config(page_title="Council Meeting Chatbot", page_icon="🏛️", layout="wide")
-st.markdown(
-    "<h1 style='text-align:center; color:white;'>Council Meeting Chatbot</h1>",
-    unsafe_allow_html=True
+# --- Config ---
+DB_PATH = "data/lancedb_data"
+TABLE_NAME = "adelaide_agendas"
+
+# Logo (try SVG first, fallback to PNG if it fails)
+LOGO_URL = "https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg"
+LOCAL_LOGO = "data/logo.png"
+
+# --- Streamlit UI ---
+st.set_page_config(
+    page_title="Council Meeting Chatbot",
+    page_icon="https://www.cityofadelaide.com.au/favicon.ico",  # City of Adelaide favicon
+    layout="centered",
 )
 
-# --- Load LanceDB ---
-logger.info(f"📦 Connecting to LanceDB at {DB_DIR}...")
-db = lancedb.connect(DB_DIR)
+# Dark theme styling
+st.markdown(
+    """
+    <style>
+    body { background-color: #1E1E1E; color: white; }
+    .user-bubble {
+        background-color: #2E86C1;
+        color: white;
+        padding: 10px;
+        border-radius: 10px;
+        margin: 5px 0;
+        text-align: right;
+    }
+    .bot-bubble {
+        background-color: #333333;
+        color: #F1F1F1;
+        padding: 10px;
+        border-radius: 10px;
+        margin: 5px 0;
+        text-align: left;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+# Try to display the SVG logo, fallback to local PNG if needed
 try:
-    table = db.open_table(TABLE_NAME)
-except Exception as e:
-    st.error(f"❌ Could not open LanceDB table `{TABLE_NAME}`. Error: {e}")
-    st.stop()
+    st.image(LOGO_URL, use_column_width=False, width=150, output_format="SVG")
+except Exception:
+    if os.path.exists(LOCAL_LOGO):
+        st.image(LOCAL_LOGO, use_column_width=False, width=150)
+    else:
+        st.write("⚠️ Logo missing")
 
-# --- Load embedding model ---
-logger.info(f"🔍 Loading embedding model: {DEFAULT_MODEL}")
-embed_model = SentenceTransformer(DEFAULT_MODEL)
-embed_dim = embed_model.get_sentence_embedding_dimension()
-logger.info(f"✅ Embedding model loaded (dim={embed_dim})")
+st.title("Council Meeting Chatbot")
 
-# --- Dimension check ---
-table_dim = None
-for field in table.schema:
-    if field.name == "vector":
-        try:
-            table_dim = field.type.list_size  # FixedSizeList
-        except Exception:
-            pass
+# --- Load DB ---
+db = lancedb.connect(DB_PATH)
+table = db.open_table(TABLE_NAME)
 
-if table_dim and table_dim != embed_dim:
-    st.error(f"❌ Embedding dimension mismatch! Table={table_dim}, Model={embed_dim}")
-
-    if st.button("🔄 Rebuild LanceDB Now (run 3-build-lancedb.py)"):
-        try:
-            subprocess.run(
-                ["python", "3-build-lancedb.py"],
-                check=True
-            )
-            st.success("✅ LanceDB rebuilt successfully. Please restart the chatbot.")
-        except subprocess.CalledProcessError as e:
-            st.error(f"❌ Failed to rebuild LanceDB: {e}")
-    st.stop()
+# --- Load Embedding Model ---
+embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 # --- Load LLM ---
-logger.info(f"🤖 Loading LLM: {LLM_MODEL}")
-tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 model = AutoModelForCausalLM.from_pretrained(
-    LLM_MODEL,
-    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto"
+    MODEL_ID,
+    torch_dtype=torch.float16,
+    device_map="auto",
 )
-logger.info("✅ LLM ready")
 
-# --- Chat UI ---
+# --- Chat State ---
 if "messages" not in st.session_state:
-    st.session_state["messages"] = []
+    st.session_state.messages = []
 
-with st.sidebar:
-    top_k = st.slider("Top-K (context docs)", 1, 10, 5)
-    temperature = st.slider("Temperature", 0.1, 2.0, 0.7)
-    max_tokens = st.slider("Max new tokens", 50, 1000, 300)
-    if st.button("🔁 Reset Conversation"):
-        st.session_state["messages"] = []
-        st.experimental_rerun()
+# Sidebar controls
+st.sidebar.header("Chat Controls")
+top_k = st.sidebar.slider("Top-K Results", 1, 10, 5)
+temperature = st.sidebar.slider("Temperature", 0.1, 2.0, 0.7)
+max_new_tokens = st.sidebar.slider("Max new tokens", 64, 1024, 256)
+suppress_context = st.sidebar.checkbox("Suppress PDF context", value=False)
 
-for role, text in st.session_state["messages"]:
-    bubble_color = "#1e90ff" if role == "user" else "#2e8b57"
-    st.markdown(
-        f"<div style='background-color:{bubble_color}; padding:10px; border-radius:10px; color:white; margin:5px 0;'>{role}: {text}</div>",
-        unsafe_allow_html=True
-    )
+if st.sidebar.button("🔄 Reset Conversation"):
+    st.session_state.messages = []
+    st.rerun()
 
-query = st.chat_input("Ask about Adelaide council meetings...")
+# --- Chat Input ---
+user_input = st.chat_input("Ask a question about Council Meetings...")
 
-if query:
-    st.session_state["messages"].append(("user", query))
+if user_input:
+    # Display user message
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # --- Embed query ---
-    query_embedding = embed_model.encode(query).tolist()
+    # Encode query
+    query_embedding = embedder.encode(user_input).tolist()
 
-    # --- Search DB ---
-    results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
-    context = "\n\n".join([r.get("text", "") for r in results]) if results else "No relevant context found."
+    # Search DB unless context is suppressed
+    context = ""
+    if not suppress_context:
+        results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
+        if results:
+            context = "\n\n".join([r.get("text", "") for r in results if "text" in r])
+        else:
+            context = "No context found."
 
-    # --- Build prompt ---
-    prompt = f"""You are a factual assistant. Answer ONLY using the provided context. 
-If the context is empty or irrelevant, say "I could not find information in the council meeting records."
+    # Construct prompt
+    prompt = f"Answer the question based only on the council documents.\n\nContext:\n{context}\n\nQuestion: {user_input}\nAnswer:"
 
-Context:
-{context}
-
-Question: {query}
-Answer:"""
-
+    # Generate response
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
-        max_new_tokens=max_tokens,
-        do_sample=True,
+        max_new_tokens=max_new_tokens,
+        do_sample=True if temperature > 0 else False,
         temperature=temperature,
-        top_k=top_k
     )
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    bot_reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    st.session_state["messages"].append(("assistant", answer))
-    st.experimental_rerun()
+    # Append bot reply
+    st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+
+# --- Display Messages ---
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.markdown(f"<div class='user-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='bot-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
