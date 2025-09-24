@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, AutoModel
 import logging
 import argparse
 import pyarrow as pa
-from tqdm import tqdm  # for progress bar
+from tqdm import tqdm
 
 # --- Config defaults ---
 CHUNKS_FILE = "data/all_chunks.pkl"
@@ -24,6 +24,31 @@ def embed_func(texts, tokenizer, model, device):
     with torch.no_grad():
         embeddings = model(**inputs).last_hidden_state[:, 0, :]
     return embeddings.cpu().to(torch.float32).numpy()
+
+def infer_schema_from_sample(sample):
+    """Infer LanceDB schema from a sample record."""
+    fields = [
+        pa.field("vector", pa.list_(pa.float32())),
+        pa.field("text", pa.string()),
+    ]
+
+    if "metadata" in sample and isinstance(sample["metadata"], dict):
+        metadata_fields = []
+        for k, v in sample["metadata"].items():
+            # Infer type from value
+            if isinstance(v, str):
+                metadata_fields.append(pa.field(k, pa.string()))
+            elif isinstance(v, int):
+                metadata_fields.append(pa.field(k, pa.int64()))
+            elif isinstance(v, float):
+                metadata_fields.append(pa.field(k, pa.float64()))
+            else:
+                metadata_fields.append(pa.field(k, pa.string()))  # fallback
+        fields.append(pa.field("metadata", pa.struct(metadata_fields)))
+    else:
+        fields.append(pa.field("metadata", pa.struct([])))
+
+    return pa.schema(fields)
 
 def main(model_id: str):
     # --- Detect GPU ---
@@ -60,22 +85,25 @@ def main(model_id: str):
     # --- Connect to LanceDB ---
     db = lancedb.connect(DB_URI)
 
-    # Define schema explicitly
-    schema = pa.schema([
-        pa.field("vector", pa.list_(pa.float32())),
-        pa.field("text", pa.string()),
-        pa.field("metadata", pa.struct([
-            pa.field("source_file", pa.string())
-        ]))
-    ])
-
     # Check if table exists already
     if TABLE_NAME in db.table_names():
         table = db.open_table(TABLE_NAME)
         existing_count = table.count_rows()
         logger.info(f"Resuming: Found existing table with {existing_count} records.")
     else:
-        logger.info(f"Creating new table with explicit schema: {TABLE_NAME}")
+        # Infer schema from first chunk
+        first_chunk = all_chunks[0]
+        if isinstance(first_chunk.get("chunk"), dict):
+            text_val = first_chunk["chunk"]["text"]
+        else:
+            text_val = first_chunk["chunk"].text
+        sample_record = {
+            "vector": [0.0],
+            "text": text_val,
+            "metadata": first_chunk.get("metadata", {})
+        }
+        schema = infer_schema_from_sample(sample_record)
+        logger.info(f"Creating new table with inferred schema: {TABLE_NAME}")
         table = db.create_table(TABLE_NAME, schema=schema)
         existing_count = 0
 
