@@ -5,89 +5,92 @@ import lancedb
 import pyarrow as pa
 from sentence_transformers import SentenceTransformer
 
+import torch
+
 # --- Config ---
 DATA_DIR = "data"
 CHUNKS_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
 DB_DIR = os.path.join(DATA_DIR, "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
+
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
 def build_lancedb(chunks, model_name):
-    """Build LanceDB table from chunks using SentenceTransformer embeddings"""
-    # Load embedding model
     logger.info(f"🔍 Loading embedding model: {model_name}")
     model = SentenceTransformer(model_name)
-    logger.info(f"✅ Embedding model loaded (device={model.device})")
 
-    # Connect to LanceDB
-    os.makedirs(DB_DIR, exist_ok=True)
+    # Ensure GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+    logger.info(f"✅ Embedding model loaded (device={device})")
+
+    # Prepare LanceDB connection
+    logger.info(f"📦 Connecting to LanceDB at {DB_DIR}...")
     db = lancedb.connect(DB_DIR)
-    logger.info(f"📦 Connected to LanceDB at {DB_DIR}")
-
-    # Define schema
-    schema = pa.schema([
-        pa.field("vector", pa.list_(pa.float32(), model.get_sentence_embedding_dimension())),
-        pa.field("text", pa.string()),
-        pa.field("source_file", pa.string()),
-        pa.field("page_number", pa.int32()),
-        pa.field("date", pa.string()),
-    ])
 
     # Drop and recreate the table fresh
     if TABLE_NAME in db.table_names():
         logger.info(f"🗑️ Dropping old table: {TABLE_NAME}")
         db.drop_table(TABLE_NAME)
 
+    schema = pa.schema(
+        [
+            pa.field("vector", pa.list_(pa.float32(), 384)),  # 384 for MiniLM
+            pa.field("text", pa.string()),
+            pa.field("source_file", pa.string()),
+            pa.field("page_number", pa.int32()),
+            pa.field("date", pa.string()),
+        ]
+    )
+
     logger.info(f"🆕 Creating new table: {TABLE_NAME}")
-    table = db.create_table(TABLE_NAME, schema=schema, data=[])
+    # ✅ FIXED: don’t pass data=[]
+    table = db.create_table(TABLE_NAME, schema=schema)
 
-    # Build records
+    # Build rows for insertion
     records = []
-    for i, c in enumerate(chunks):
-        text = c.get("text", "").strip()
+    for c in chunks:
+        text = c["text"]
         metadata = c.get("metadata", {})
-        if not text:
-            continue
 
-        records.append({
-            "text": text,
-            "vector": model.encode(text).tolist(),
-            "source_file": metadata.get("source_file", ""),
-            "page_number": metadata.get("page_number", -1),
-            "date": metadata.get("date", ""),
-        })
+        # Compute embedding
+        vector = model.encode(text).tolist()
 
-        if (i + 1) % 10 == 0:
-            logger.info(f"  🔨 Encoded {i+1}/{len(chunks)} chunks...")
+        records.append(
+            {
+                "vector": vector,
+                "text": text,
+                "source_file": metadata.get("source_file"),
+                "page_number": metadata.get("page_number"),
+                "date": metadata.get("date"),
+            }
+        )
 
-    if not records:
-        logger.warning("⚠️ No valid chunks to insert! Table will remain empty.")
-    else:
-        logger.info(f"📥 Inserting {len(records)} rows into LanceDB...")
+    if records:
+        logger.info(f"➕ Inserting {len(records)} records...")
         table.add(records)
-        logger.info("✅ Data inserted successfully.")
+    else:
+        logger.warning("⚠️ No rows to insert! Check your chunking pipeline.")
 
-    # Schema check
-    logger.info("📊 Final table schema:")
-    logger.info(table.schema)
+    logger.info("✅ LanceDB build complete.")
 
 
 def main():
     if not os.path.exists(CHUNKS_FILE):
-        logger.error(f"❌ No chunks file found at {CHUNKS_FILE}. Run script 2 first.")
+        logger.error(f"❌ Chunks file not found: {CHUNKS_FILE}")
         return
 
-    # Load chunks
     with open(CHUNKS_FILE, "rb") as f:
         chunks = pickle.load(f)
+
     logger.info(f"✅ Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
 
-    # Build LanceDB
     build_lancedb(chunks, DEFAULT_MODEL)
 
 
