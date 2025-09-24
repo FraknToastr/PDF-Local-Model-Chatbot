@@ -5,7 +5,8 @@ import torch
 from transformers import AutoTokenizer, AutoModel
 import logging
 import argparse
-from tqdm import tqdm  # progress bar
+import pyarrow as pa
+from tqdm import tqdm  # for progress bar
 
 # --- Config defaults ---
 CHUNKS_FILE = "data/all_chunks.pkl"
@@ -41,7 +42,7 @@ def main(model_id: str):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModel.from_pretrained(
         model_id,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto" if torch.cuda.is_available() else None
     ).to(device)
     logger.info("Model loaded successfully.")
@@ -59,14 +60,23 @@ def main(model_id: str):
     # --- Connect to LanceDB ---
     db = lancedb.connect(DB_URI)
 
+    # Define schema explicitly
+    schema = pa.schema([
+        pa.field("vector", pa.list_(pa.float32())),
+        pa.field("text", pa.string()),
+        pa.field("metadata", pa.struct([
+            pa.field("source_file", pa.string())
+        ]))
+    ])
+
     # Check if table exists already
     if TABLE_NAME in db.table_names():
         table = db.open_table(TABLE_NAME)
         existing_count = table.count_rows()
         logger.info(f"Resuming: Found existing table with {existing_count} records.")
     else:
-        logger.info(f"Creating new table: {TABLE_NAME}")
-        table = db.create_table(TABLE_NAME, data=[])
+        logger.info(f"Creating new table with explicit schema: {TABLE_NAME}")
+        table = db.create_table(TABLE_NAME, schema=schema)
         existing_count = 0
 
     # Save metadata about the embedding model
