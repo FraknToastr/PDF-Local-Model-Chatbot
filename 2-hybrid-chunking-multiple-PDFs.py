@@ -41,7 +41,6 @@ def extract_date_from_path(path: str):
 
 def ensure_doc_list(conv_result):
     """Normalize ConversionResult → list[DoclingDocument]."""
-    docs = None
     if hasattr(conv_result, "documents") and conv_result.documents:
         docs = conv_result.documents
     elif hasattr(conv_result, "document") and conv_result.document is not None:
@@ -49,6 +48,7 @@ def ensure_doc_list(conv_result):
     else:
         raise ValueError("ConversionResult has neither .document nor .documents")
 
+    # If it’s a single DoclingDocument
     try:
         from docling_core.types.doc.document import DoclingDocument  # type: ignore
         if isinstance(docs, DoclingDocument):
@@ -56,23 +56,12 @@ def ensure_doc_list(conv_result):
     except Exception:
         pass
 
+    # If it’s iterable, force into list
     if hasattr(docs, "__iter__") and not isinstance(docs, list):
         docs = list(docs)
     if not isinstance(docs, list):
         docs = [docs]
     return docs
-
-def doc_to_dict(doc):
-    """Convert DoclingDocument → dict so HybridChunker won’t choke on iterators."""
-    if hasattr(doc, "model_dump"):  # Pydantic v2
-        return doc.model_dump()
-    if hasattr(doc, "dict"):        # Pydantic v1
-        return doc.dict()
-    try:
-        import json
-        return json.loads(doc.json())
-    except Exception:
-        return doc
 
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
@@ -122,8 +111,8 @@ def process_pdfs_for_chunking():
 
             added = 0
             for doc in docs:
-                doc_dict = doc_to_dict(doc)
-                chunks = chunker.chunk(doc_dict)
+                # ✅ Pass DoclingDocument directly
+                chunks = chunker.chunk(doc)
                 chunks = list(chunks) if hasattr(chunks, "__iter__") else chunks
                 logger.info(f"Produced {len(chunks)} chunks from {rel_path}")
 
