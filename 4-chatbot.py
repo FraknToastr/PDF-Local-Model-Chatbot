@@ -100,16 +100,13 @@ def clear_chat():
     st.session_state.answer_text = ""
     st.session_state.sources = []
     st.session_state.progress = 0
+    st.session_state.chat_history = []
     st.experimental_rerun()
 
 # --- Chatbot UI ---
 st.title("📄 PDF Local Model Chatbot")
 
-# Clear Chat button at top
-if st.button("🧹 Clear Chat"):
-    clear_chat()
-
-# Store session state
+# Initialize session state
 if "user_query" not in st.session_state:
     st.session_state.user_query = ""
 if "answer_text" not in st.session_state:
@@ -120,6 +117,17 @@ if "progress" not in st.session_state:
     st.session_state.progress = 0
 if "stop_requested" not in st.session_state:
     st.session_state.stop_requested = False
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# Buttons
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🧹 Clear Chat"):
+        clear_chat()
+with col2:
+    if st.button("⏹ Stop Generation"):
+        st.session_state.stop_requested = True
 
 # Input
 user_query = st.text_input("Ask a question about the documents:", value=st.session_state.user_query)
@@ -165,9 +173,6 @@ if user_query:
     answer_placeholder = st.empty()
     streamed_text = ""
 
-    if st.button("⏹ Stop Generation"):
-        stop_generation(gen_thread)
-
     for new_text in streamer:
         if st.session_state.stop_requested:
             break
@@ -177,7 +182,22 @@ if user_query:
 
     progress.progress(100, text="✅ Done!")
 
-    # Show sources
-    with st.expander("📚 Sources"):
-        for r in st.session_state.sources:
-            st.markdown(f"- {r['metadata'].get('source_file', 'Unknown source')}")
+    # Save into chat history
+    if not st.session_state.stop_requested:
+        st.session_state.chat_history.append({
+            "question": user_query,
+            "answer": st.session_state.answer_text,
+            "sources": st.session_state.sources
+        })
+
+# --- Chat history panel ---
+if st.session_state.chat_history:
+    st.subheader("📜 Chat History")
+    for i, turn in enumerate(st.session_state.chat_history, 1):
+        with st.expander(f"Q{i}: {turn['question'][:60]}..."):
+            st.markdown(f"**Q{i}:** {turn['question']}")
+            st.markdown(f"**A{i}:** {turn['answer']}")
+            if turn["sources"]:
+                st.markdown("**Sources:**")
+                for r in turn["sources"]:
+                    st.markdown(f"- {r['metadata'].get('source_file', 'Unknown source')}")
