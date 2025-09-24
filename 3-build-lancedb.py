@@ -27,11 +27,12 @@ def main(model_id: str):
     # --- Detect GPU ---
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        logger.info("🚀 Using GPU for embeddings")
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"🚀 Using GPU: {gpu_name}")
         dtype = torch.float16
     else:
         device = torch.device("cpu")
-        logger.info("⚠️ GPU not found, falling back to CPU")
+        logger.warning("⚠️ No GPU detected, using CPU")
         dtype = torch.float32
 
     # --- Load embedding model ---
@@ -64,7 +65,7 @@ def main(model_id: str):
     table = db.create_table(TABLE_NAME, data=[])
 
     # Save metadata about the embedding model
-    meta_table = db.create_table(
+    db.create_table(
         "embedding_metadata",
         data=[{"model_id": model_id}],
         mode="overwrite"
