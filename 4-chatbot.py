@@ -35,7 +35,8 @@ chat_model_choice = st.sidebar.selectbox(
 # --- Detect GPU ---
 if torch.cuda.is_available():
     device = "cuda"
-    st.sidebar.success("🚀 Using GPU")
+    gpu_name = torch.cuda.get_device_name(0)
+    st.sidebar.success(f"🚀 Using GPU: {gpu_name}")
 else:
     device = "cpu"
     st.sidebar.warning("⚠️ Using CPU")
