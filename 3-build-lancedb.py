@@ -5,6 +5,7 @@ import torch
 from transformers import AutoTokenizer, AutoModel
 import logging
 import argparse
+from tqdm import tqdm  # progress bar
 
 # --- Config defaults ---
 CHUNKS_FILE = "data/all_chunks.pkl"
@@ -52,7 +53,8 @@ def main(model_id: str):
     with open(CHUNKS_FILE, "rb") as f:
         all_chunks = pickle.load(f)
 
-    logger.info(f"Loaded {len(all_chunks)} chunks from {CHUNKS_FILE}")
+    total_chunks = len(all_chunks)
+    logger.info(f"Loaded {total_chunks} chunks from {CHUNKS_FILE}")
 
     # --- Connect to LanceDB ---
     db = lancedb.connect(DB_URI)
@@ -75,16 +77,17 @@ def main(model_id: str):
     )
     logger.info(f"Saved embedding model metadata: {model_id}")
 
-    # --- Resume from where we left off ---
-    total_chunks = len(all_chunks)
+    # --- Resume check ---
     if existing_count >= total_chunks:
         logger.info("✅ All chunks already embedded. Nothing to do.")
         return
 
     logger.info(f"Starting from chunk {existing_count} / {total_chunks}")
 
-    # --- Insert embeddings batch by batch ---
+    # --- Insert embeddings batch by batch with tqdm ---
     batch_size = 32
+    pbar = tqdm(total=total_chunks, initial=existing_count, desc="Embedding chunks", unit="chunk")
+
     for i in range(existing_count, total_chunks, batch_size):
         batch = all_chunks[i:i+batch_size]
 
@@ -107,10 +110,13 @@ def main(model_id: str):
                 "metadata": metas[j]
             })
 
-        # Write batch to LanceDB immediately (saves progress!)
+        # Save progress immediately (batch-safe)
         table.add(records)
-        logger.info(f"✅ Saved batch {i // batch_size + 1} → processed {i+len(batch)} / {total_chunks} chunks")
 
+        # Update progress bar
+        pbar.update(len(batch))
+
+    pbar.close()
     logger.info("🎉 Ingestion complete!")
 
 if __name__ == "__main__":
