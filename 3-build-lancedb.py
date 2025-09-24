@@ -1,6 +1,8 @@
 import os
 import pickle
 import logging
+import json
+import torch
 import lancedb
 from sentence_transformers import SentenceTransformer
 
@@ -10,60 +12,78 @@ CHUNKS_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
 DB_DIR = os.path.join(DATA_DIR, "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
 
+# Choose embedding model here
+MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"  # or "mixedbread-ai/mxbai-embed-large-v1"
+
+# Infer vector dimension
+VECTOR_DIM = 384 if "MiniLM" in MODEL_ID else 1024
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Embedding model
-MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+def main():
+    # --- Init embedding model ---
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"🚀 Using {device.upper()} for embeddings")
+    embedder = SentenceTransformer(MODEL_ID, device=device)
+    embedder.max_seq_length = 512  # truncate long texts safely
 
-
-def build_lancedb():
-    logger.info("🚀 Building LanceDB...")
-
-    # Load embedding model with truncation
-    embedder = SentenceTransformer(MODEL_ID)
-    embedder.max_seq_length = 512  # ✅ enforce safe truncation
-    logger.info(f"Loaded embedding model: {MODEL_ID}")
-
-    # Load chunks
+    # --- Load chunks ---
     if not os.path.exists(CHUNKS_FILE):
         logger.error(f"❌ No chunks found at {CHUNKS_FILE}. Run script 2 first.")
         return
 
     with open(CHUNKS_FILE, "rb") as f:
         chunks = pickle.load(f)
+    logger.info(f"📦 Loaded {len(chunks)} chunks")
 
-    logger.info(f"Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
-
-    # Embed all chunks
-    records = []
-    for entry in chunks:
-        text = entry["chunk"]["text"].strip()
-        if not text:
-            continue
-
-        # Safe embedding with truncation
-        emb = embedder.encode(text, normalize_embeddings=True).tolist()
-
-        record = {
-            "vector": emb,
-            "text": text,
-            "source_file": entry.get("metadata", {}).get("source_file"),
-            "page_number": entry.get("metadata", {}).get("page_number"),
-            "date": entry.get("metadata", {}).get("date"),
-        }
-        records.append(record)
-
-    # Open/create LanceDB
+    # --- Prepare DB ---
+    os.makedirs(DB_DIR, exist_ok=True)
     db = lancedb.connect(DB_DIR)
 
-    # Drop table if it exists (fresh rebuild)
     if TABLE_NAME in db.table_names():
+        logger.info(f"🗑️ Dropping old table: {TABLE_NAME}")
         db.drop_table(TABLE_NAME)
 
-    table = db.create_table(TABLE_NAME, data=records)
-    logger.info(f"✅ Created table '{TABLE_NAME}' with {len(records)} records.")
+    logger.info(f"🆕 Creating table: {TABLE_NAME}")
+    table = db.create_table(
+        TABLE_NAME,
+        data=[
+            {
+                "vector": [0.0] * VECTOR_DIM,
+                "text": "",
+                "source_file": "",
+                "page_number": 0,
+                "date": "",
+            }
+        ],
+        mode="overwrite"
+    )
 
+    # --- Embed & Insert ---
+    records = []
+    for ch in chunks:
+        text = ch["chunk"]["text"]
+        metadata = ch["metadata"]
+
+        vec = embedder.encode(text, convert_to_numpy=True).tolist()
+
+        records.append({
+            "vector": vec,
+            "text": text,
+            "source_file": metadata.get("source_file", ""),
+            "page_number": metadata.get("page_number", 0),
+            "date": metadata.get("date", ""),
+        })
+
+    table.add(records)
+    logger.info(f"✅ Inserted {len(records)} rows into LanceDB")
+
+    # --- Save embedding metadata ---
+    meta_path = os.path.join(DB_DIR, "embedding_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump({"model_id": MODEL_ID, "vector_dim": VECTOR_DIM}, f)
+    logger.info(f"💾 Saved embedding metadata to {meta_path}")
 
 if __name__ == "__main__":
-    build_lancedb()
+    main()
