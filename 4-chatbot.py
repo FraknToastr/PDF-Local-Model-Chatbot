@@ -1,120 +1,94 @@
 import os
-import streamlit as st
+import logging
 import lancedb
-import torch
-from sentence_transformers import SentenceTransformer
+import streamlit as st
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
 
 # --- Config ---
-DB_PATH = "data/lancedb_data"
+DATA_DIR = "data"
+DB_PATH = os.path.join(DATA_DIR, "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
+
+DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+GENERATION_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+
 LOGO_URL = "https://www.cityofadelaide.com.au/common/base/img/coa-logo-white.svg"
 
-# --- UI Setup ---
-st.set_page_config(page_title="Council Meeting Chatbot", page_icon=LOGO_URL, layout="centered")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# Custom CSS for dark theme + chat bubbles
-st.markdown(
-    """
-    <style>
-    body {
-        background-color: #121212;
-        color: #ffffff;
-    }
-    .user-bubble {
-        background-color: #2e7d32;
-        color: white;
-        padding: 10px;
-        border-radius: 10px;
-        margin-bottom: 5px;
-        text-align: right;
-    }
-    .bot-bubble {
-        background-color: #424242;
-        color: white;
-        padding: 10px;
-        border-radius: 10px;
-        margin-bottom: 5px;
-        text-align: left;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# --- Sidebar Controls ---
-st.sidebar.image(LOGO_URL, use_column_width=True)
+# --- Sidebar ---
+st.sidebar.image(LOGO_URL, width=200)
 st.sidebar.title("⚙️ Settings")
 
 embedding_model_name = st.sidebar.selectbox(
-    "Embedding Model",
+    "Embedding model",
     ["sentence-transformers/all-MiniLM-L6-v2", "mixedbread-ai/mxbai-embed-large-v1"],
     index=0,
 )
 
-generation_model_name = st.sidebar.selectbox(
-    "Generation Model",
-    ["mistralai/Mistral-7B-Instruct-v0.2", "meta-llama/Llama-2-7b-chat-hf"],
-    index=0,
+top_k = st.sidebar.slider("Top-K results", 1, 10, 5)
+temperature = st.sidebar.slider("Temperature", 0.1, 2.0, 0.7)
+max_new_tokens = st.sidebar.slider("Max new tokens", 50, 500, 200)
+suppress_context = st.sidebar.checkbox("Suppress context display", value=True)
+
+if st.sidebar.button("Reset Conversation"):
+    st.session_state["history"] = []
+    st.rerun()
+
+# --- Title ---
+st.markdown(
+    f"""
+    <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+        <img src="{LOGO_URL}" alt="City of Adelaide" width="60">
+        <h1 style="color: white; margin: 0;">Council Meeting Chatbot</h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-top_k = st.sidebar.slider("Top-K (context chunks)", 1, 20, 5)
-temperature = st.sidebar.slider("Temperature", 0.1, 1.5, 0.7, 0.1)
-max_new_tokens = st.sidebar.slider("Max new tokens", 64, 1024, 512, 64)
-suppress_boilerplate = st.sidebar.checkbox("Suppress ceremonial text", value=True)
-
-# --- Load DB ---
+# --- Connect DB ---
 db = lancedb.connect(DB_PATH)
 table = db.open_table(TABLE_NAME)
 
-# --- Load Models ---
+# --- Load models ---
 @st.cache_resource
-def load_embedding_model(name):
-    return SentenceTransformer(name)
+def load_models():
+    embed_model = SentenceTransformer(embedding_model_name, device="cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(GENERATION_MODEL)
+    model = AutoModelForCausalLM.from_pretrained(
+        GENERATION_MODEL,
+        torch_dtype="auto",
+        device_map="auto"
+    )
+    return embed_model, tokenizer, model
 
-@st.cache_resource
-def load_generation_model(name):
-    tokenizer = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForCausalLM.from_pretrained(name, device_map="auto", torch_dtype=torch.float16)
-    return tokenizer, model
+import torch
+embed_model, tokenizer, model = load_models()
 
-embedder = load_embedding_model(embedding_model_name)
-tokenizer, model = load_generation_model(generation_model_name)
-
-# --- Deduplication Helper ---
-def clean_text(text):
-    ceremonial_phrases = [
-        "Council acknowledges that we are meeting on traditional Country",
-        "We recognise and respect their cultural heritage",
-        "Minute's silence in memory",
-        "Council Pledge",
-    ]
-    for phrase in ceremonial_phrases:
-        if suppress_boilerplate and phrase.lower() in text.lower():
-            return ""
-    return text.strip()
-
-# --- Chat UI ---
-st.image(LOGO_URL, width=120)
-st.title("Council Meeting Chatbot")
+# --- Chat input ---
+user_query = st.chat_input("Ask about Adelaide Council meetings...")
 
 if "history" not in st.session_state:
     st.session_state["history"] = []
 
-user_query = st.chat_input("Ask a question about the council meeting agendas...")
-
 if user_query:
     # Embed query
-    query_embedding = embedder.encode(user_query).tolist()
-
-    # Search LanceDB (but don’t dump results to screen)
+    query_embedding = embed_model.encode(user_query).tolist()
     results = table.search(query_embedding, vector_column_name="vector").limit(top_k).to_list()
-    context = "\n\n".join([clean_text(r.get("text", "")) for r in results if r.get("text")]) or "No relevant context found."
 
-    # Build prompt (internal use only)
-    prompt = f"Answer factually based only on the following context:\n\n{context}\n\nQuestion: {user_query}\nAnswer:"
+    # Build context string
+    context = "\n\n".join([r.get("text", "") for r in results]) if results else "No context found."
 
-    # Generate response
+    # Prompt
+    prompt = f"""Answer factually based only on the following context:
+{context}
+
+Question: {user_query}
+Answer:"""
+
+    # Generate
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
@@ -122,15 +96,34 @@ if user_query:
         temperature=temperature,
         do_sample=(temperature > 0.1),
     )
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    raw_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # Save only Q&A to history
+    # --- Extract only the answer part ---
+    response = None
+    if "Answer:" in raw_response:
+        response = raw_response.split("Answer:")[-1].strip()
+        response = "Answer: " + response  # keep prefix
+    else:
+        # fallback: take the last line
+        sentences = raw_response.strip().split("\n")
+        if sentences:
+            response = sentences[-1].strip()
+        else:
+            response = raw_response.strip()
+
+    # Save clean Q&A only
     st.session_state["history"].append(("user", user_query))
     st.session_state["history"].append(("bot", response))
 
-# --- Display Chat ---
+# --- Display history ---
 for role, text in st.session_state["history"]:
     if role == "user":
-        st.markdown(f"<div class='user-bubble'>{text}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='background-color: #1a1c23; color: white; padding: 10px; border-radius: 10px; float: right; clear: both; margin: 5px 0; max-width: 70%; text-align: right;'>{text}</div>",
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown(f"<div class='bot-bubble'>{text}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='background-color: #0b5ed7; color: white; padding: 10px; border-radius: 10px; float: left; clear: both; margin: 5px 0; max-width: 70%;'>{text}</div>",
+            unsafe_allow_html=True,
+        )
