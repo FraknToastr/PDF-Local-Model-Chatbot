@@ -1,7 +1,7 @@
 import streamlit as st
 import lancedb
 import torch
-from transformers import AutoTokenizer, AutoModel, pipeline, TextIteratorStreamer
+from transformers import AutoTokenizer, AutoModel, TextIteratorStreamer
 from typing import List
 import threading
 
@@ -42,7 +42,7 @@ else:
     device = "cpu"
     st.sidebar.warning("⚠️ Using CPU")
 
-# --- Load embedding model dynamically ---
+# --- Load embedding model ---
 @st.cache_resource
 def load_embedder(model_id: str):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -61,7 +61,7 @@ def embed_func(texts: List[str]):
         embeddings = embed_model(**inputs).last_hidden_state[:, 0, :]
     return embeddings.cpu().to(torch.float32).numpy()
 
-# --- Load chat model dynamically (no pipeline, manual streaming) ---
+# --- Load chat model ---
 @st.cache_resource
 def load_chat_model(model_id: str):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -88,6 +88,12 @@ st.title("📄 PDF Local Model Chatbot")
 user_query = st.text_input("Ask a question about the documents:")
 
 if user_query:
+    # Reset stop flag at new query
+    if "stop_requested" not in st.session_state:
+        st.session_state.stop_requested = False
+    else:
+        st.session_state.stop_requested = False
+
     # Progress bar
     progress = st.progress(0, text="🔎 Embedding query...")
 
@@ -124,9 +130,17 @@ if user_query:
     answer_placeholder = st.empty()
     streamed_text = ""
 
+    # Stop button
+    stop_button = st.button("⏹ Stop Generation")
+
     for new_text in streamer:
+        if st.session_state.stop_requested:
+            break
         streamed_text += new_text
         answer_placeholder.markdown(streamed_text)
+
+        if stop_button:
+            st.session_state.stop_requested = True
 
     progress.progress(100, text="✅ Done!")
 
