@@ -200,4 +200,10 @@ if st.session_state.chat_history:
             if turn["sources"]:
                 st.markdown("**Sources:**")
                 for r in turn["sources"]:
-                    st.markdown(f"- {r['metadata'].get('source_file', 'Unknown source')}")
+                    meta_lines = []
+                    if "source_file" in r:
+                        meta_lines.append(f"📄 {r['source_file']}")
+                    for k, v in r.items():
+                        if k not in ["vector", "text", "source_file"] and v is not None:
+                            meta_lines.append(f"- **{k}**: {v}")
+                    st.markdown("\n".join(meta_lines))
