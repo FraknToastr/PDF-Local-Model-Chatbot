@@ -1,144 +1,112 @@
 import os
 import pickle
 import logging
-import lancedb
+import argparse
 import torch
+import lancedb
+from lancedb.pydantic import LanceModel, Vector
+from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModel
-import pyarrow as pa
+import numpy as np
 
 # --- Config ---
 DATA_DIR = "data"
 CHUNKS_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
-DB_DIR = os.path.join(DATA_DIR, "lancedb_data")
+DB_PATH = os.path.join(DATA_DIR, "lancedb_data")
 TABLE_NAME = "adelaide_agendas"
 VECTOR_COL = "vector"
-MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def load_model(model_id: str):
-    logger.info(f"Loading embedding model: {model_id}")
+# --- Embedding model config ---
+DEFAULT_MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    )
+class ChunkEmbedding(BaseModel):
+    vector: Vector(1024)  # vector length matches embedding model
+    text: str
+    source_file: str
+    page_number: int | None = None
+    date: str | None = None
 
-    if torch.cuda.is_available():
-        model = model.to("cuda")
+def embed_texts(model, tokenizer, texts, device="cpu", batch_size=8):
+    """Generate embeddings for a list of texts"""
+    embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        inputs = tokenizer(batch, padding=True, truncation=True, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Take mean pooling
+            emb = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+        embeddings.extend(emb)
+    return np.array(embeddings)
+
+def main(model_id):
+    if not os.path.exists(CHUNKS_FILE):
+        logger.error(f"❌ No chunks file found at {CHUNKS_FILE}. Run script 2 first.")
+        return
+
+    with open(CHUNKS_FILE, "rb") as f:
+        all_chunks = pickle.load(f)
+
+    if not all_chunks:
+        logger.error("❌ No chunks found in all_chunks.pkl. Did script 2 produce 0 chunks?")
+        return
+
+    logger.info(f"Loaded {len(all_chunks)} chunks from {CHUNKS_FILE}")
+
+    # --- Load embedding model ---
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
         logger.info(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
     else:
-        logger.warning("⚠️ No GPU detected, using CPU")
+        logger.warning("⚠️ Using CPU (GPU not available)")
 
-    return tokenizer, model
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModel.from_pretrained(model_id).to(device)
+    logger.info(f"Model loaded successfully: {model_id}")
 
-def embed_texts(tokenizer, model, texts):
-    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-    if torch.cuda.is_available():
-        inputs = {k: v.to("cuda") for k, v in inputs.items()}
-    with torch.no_grad():
-        embeddings = model(**inputs).last_hidden_state.mean(dim=1).cpu().numpy()
-    return embeddings
+    # --- Prepare texts ---
+    texts = [c["chunk"]["text"] for c in all_chunks]
+    metadatas = [c["metadata"] for c in all_chunks]
 
-def main():
-    if not os.path.exists(CHUNKS_FILE):
-        logger.error(f"❌ Chunks file not found: {CHUNKS_FILE}. Run script 2 first.")
-        return
+    # --- Compute embeddings ---
+    logger.info("Computing embeddings...")
+    vectors = embed_texts(model, tokenizer, texts, device=device, batch_size=8)
 
-    # Load chunks
-    with open(CHUNKS_FILE, "rb") as f:
-        chunks = pickle.load(f)
-    logger.info(f"Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
+    logger.info(f"✅ Generated embeddings: {vectors.shape}")
 
-    if not chunks:
-        logger.error("❌ No chunks to embed. Exiting.")
-        return
+    # --- Open LanceDB ---
+    db = lancedb.connect(DB_PATH)
 
-    # Load embedding model
-    tokenizer, model = load_model(MODEL_ID)
-
-    # Prepare texts & metadata
-    texts = [c["chunk"]["text"] for c in chunks if "chunk" in c and "text" in c["chunk"]]
-    metadata = [c.get("metadata", {}) for c in chunks]
-
-    # Generate embeddings
-    embeddings = embed_texts(tokenizer, model, texts)
-
-    # Connect to LanceDB
-    db = lancedb.connect(DB_DIR)
-
-    # Define schema
-    schema = pa.schema([
-        (VECTOR_COL, pa.list_(pa.float32())),
-        ("text", pa.string()),
-        ("source_file", pa.string()),
-        ("page_number", pa.int64()),
-        ("date", pa.string()),
-    ])
-
-    # Check if table exists
+    # Drop existing table if it exists
     if TABLE_NAME in db.table_names():
-        logger.info(f"📂 Table '{TABLE_NAME}' already exists → checking for duplicates")
-        table = db.open_table(TABLE_NAME)
+        logger.warning(f"⚠️ Dropping existing table {TABLE_NAME}")
+        db.drop_table(TABLE_NAME)
 
-        # Fetch existing keys
-        existing = set()
-        for row in table.to_list():
-            key = (row.get("source_file"), row.get("page_number"), row.get("text"))
-            existing.add(key)
+    # Create new table
+    logger.info(f"Creating new table: {TABLE_NAME}")
+    table = db.create_table(TABLE_NAME, schema=ChunkEmbedding)
 
-        # Build new unique records
-        new_records = []
-        for emb, txt, meta in zip(embeddings, texts, metadata):
-            key = (meta.get("source_file"), meta.get("page_number"), txt)
-            if key in existing:
-                continue
-            rec = {
-                VECTOR_COL: emb.tolist(),
-                "text": txt,
+    # Insert records
+    records = []
+    for vec, text, meta in zip(vectors, texts, metadatas):
+        records.append(
+            {
+                VECTOR_COL: vec.tolist(),
+                "text": text,
                 "source_file": meta.get("source_file"),
                 "page_number": meta.get("page_number"),
                 "date": meta.get("date"),
             }
-            new_records.append(rec)
+        )
 
-        if new_records:
-            table.add(new_records)
-            logger.info(f"✅ Appended {len(new_records)} new unique records to '{TABLE_NAME}'")
-        else:
-            logger.info("ℹ️ No new unique records to add")
-
-    else:
-        logger.info(f"📂 Table '{TABLE_NAME}' does not exist → creating new table")
-        records = []
-        for emb, txt, meta in zip(embeddings, texts, metadata):
-            rec = {
-                VECTOR_COL: emb.tolist(),
-                "text": txt,
-                "source_file": meta.get("source_file"),
-                "page_number": meta.get("page_number"),
-                "date": meta.get("date"),
-            }
-            records.append(rec)
-
-        table = db.create_table(TABLE_NAME, schema=schema, data=records, mode="create")
-        logger.info(f"✅ Created new table '{TABLE_NAME}' with {len(records)} records")
-
-    # Sanity check: confirm DB exists
-    if os.path.exists(DB_DIR):
-        logger.info(f"📦 LanceDB directory: {DB_DIR}")
-    else:
-        logger.error(f"❌ Expected LanceDB directory missing: {DB_DIR}")
-
-    # Print schema dump
-    logger.info("📋 Table schema:")
-    for field in table.schema:
-        logger.info(f"  - {field.name}: {field.type}")
-
-    # Print table stats
-    logger.info(f"🔢 Total records in '{TABLE_NAME}': {table.count_rows()}")
+    table.add(records)
+    logger.info(f"✅ Inserted {len(records)} records into LanceDB table '{TABLE_NAME}'")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_id", type=str, default=DEFAULT_MODEL_ID, help="Embedding model ID")
+    args = parser.parse_args()
+    main(args.model_id)
