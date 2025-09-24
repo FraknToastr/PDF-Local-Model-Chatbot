@@ -60,7 +60,7 @@ def main():
     tokenizer, model = load_model(MODEL_ID)
 
     # Prepare texts & metadata
-    texts = [c["chunk"]["text"] for c in chunks]
+    texts = [c["chunk"]["text"] for c in chunks if "chunk" in c and "text" in c["chunk"]]
     metadata = [c.get("metadata", {}) for c in chunks]
 
     # Generate embeddings
