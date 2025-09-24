@@ -9,6 +9,7 @@ import gc
 # --- Config ---
 DB_URI = "data/lancedb_data"
 TABLE_NAME = "adelaide_agendas"
+VECTOR_COL = "vector"  # name of the embedding column in LanceDB
 
 # --- Sidebar controls ---
 st.sidebar.header("⚙️ Settings")
@@ -83,6 +84,12 @@ if TABLE_NAME not in db.table_names():
 
 table = db.open_table(TABLE_NAME)
 
+# --- Schema check ---
+schema_fields = [f.name for f in table.schema]
+if VECTOR_COL not in schema_fields:
+    st.error(f"❌ No '{VECTOR_COL}' column found in LanceDB table. Schema fields: {schema_fields}")
+    st.stop()
+
 # --- Helper to stop generation ---
 def stop_generation(thread: threading.Thread):
     st.session_state.stop_requested = True
@@ -143,8 +150,8 @@ if user_query:
     query_embedding = embed_func([user_query])[0]
     progress.progress(25, text="📂 Searching LanceDB...")
 
-    # Step 2: Retrieve relevant chunks
-    results = table.search(query_embedding).limit(top_k).to_list()
+    # Step 2: Retrieve relevant chunks (explicit vector col)
+    results = table.search(query_embedding, vector_column_name=VECTOR_COL).limit(top_k).to_list()
     st.session_state.sources = results
     progress.progress(50, text="📝 Preparing context...")
 
@@ -209,6 +216,6 @@ if st.session_state.chat_history:
                 for idx, r in enumerate(turn["sources"], 1):
                     meta_lines = [f"🔖 S{idx} → {r.get('source_file','Unknown file')}"]
                     for k, v in r.items():
-                        if k not in ["vector", "text", "source_file"] and v is not None:
+                        if k not in [VECTOR_COL, "text", "source_file"] and v is not None:
                             meta_lines.append(f"- **{k}**: {v}")
                     st.markdown("\n".join(meta_lines))
