@@ -2,6 +2,12 @@ import pickle, re
 with open("data/all_chunks.pkl","rb") as f:
     chunks = pickle.load(f)
 
-hits = [c for c in chunks if "Lomax-Smith" in c["chunk"]["text"]]
-print("Hits:", len(hits))
-print("Examples:", [ (c["metadata"].get("source_file"), c["metadata"].get("page_number")) for c in hits[:5] ])
+hits = []
+for c in chunks:
+    if "chunk" in c:
+        text = c["chunk"]["text"]
+    else:
+        text = c.get("text", "")
+    if "Lomax-Smith" in text:
+        hits.append(c)
+
