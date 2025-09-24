@@ -8,6 +8,11 @@ from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline, PdfPipel
 from docling.chunking import HybridChunker
 import torch
 
+# --- Hide transformer warnings about long sequences ---
+from transformers.utils import logging as hf_logging
+hf_logging.set_verbosity_error()
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
 # --- Config ---
 DATA_DIR = "data"
 OUTPUT_FILE = os.path.join(DATA_DIR, "all_chunks.pkl")
@@ -23,9 +28,11 @@ else:
     device = "cpu"
     logger.warning("⚠️ No GPU detected, using CPU")
 
+
 def extract_date_from_path(path: str):
     parts = path.replace("\\", "/").split("/")
     date_val = None
+
     if len(parts) >= 3:
         year = parts[-3]
         month_part = parts[-2]
@@ -39,6 +46,7 @@ def extract_date_from_path(path: str):
                 date_val = None
     return date_val
 
+
 def process_pdfs_for_chunking():
     logger.info("Initializing document converter and chunker...")
 
@@ -46,8 +54,8 @@ def process_pdfs_for_chunking():
     pipeline = StandardPdfPipeline(pipeline_options=pipeline_options)
     converter = DocumentConverter({InputFormat.PDF: pipeline})
 
-    # ✅ Stronger chunking (smaller chunks + more overlap)
-    chunker = HybridChunker(chunk_size=300, overlap=100)
+    # ✅ Safer chunk size for 512-token models
+    chunker = HybridChunker(chunk_size=240, overlap=50)
 
     logger.info("Initialization successful.")
 
@@ -61,7 +69,6 @@ def process_pdfs_for_chunking():
 
     processed_files = {c.get("metadata", {}).get("source_file") for c in all_chunks if "metadata" in c}
 
-    # Scan for PDFs
     logger.info(f"Scanning for PDF files in '{DATA_DIR}'...")
     pdf_files = []
     for root, _, files in os.walk(DATA_DIR):
@@ -82,16 +89,15 @@ def process_pdfs_for_chunking():
 
         try:
             result = converter.convert(pdf_path)
-            doc = result.document  # ✅ Proper doc object
+            doc = result.document  # ✅ Correct object
 
             chunks = chunker.chunk(doc)
-            logger.info(f"Extracted {len(chunks)} chunks from {rel_path}")
 
             for ch in chunks:
                 metadata = {
                     "source_file": rel_path,
                     "page_number": getattr(ch, "page_number", None),
-                    "date": extract_date_from_path(rel_path)
+                    "date": extract_date_from_path(rel_path),
                 }
                 all_chunks.append({"chunk": {"text": ch.text}, "metadata": metadata})
 
@@ -99,12 +105,12 @@ def process_pdfs_for_chunking():
             logger.error(f"Failed to process '{rel_path}': {e}")
             continue
 
-    # Save updated chunks
     with open(OUTPUT_FILE, "wb") as f:
         pickle.dump(all_chunks, f)
 
     logger.info(f"Chunks saved successfully! Total: {len(all_chunks)}")
     logger.info(f"✅ Wrote {len(all_chunks)} chunks → {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     process_pdfs_for_chunking()
